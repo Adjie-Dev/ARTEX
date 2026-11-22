@@ -33,7 +33,7 @@ func dropReason(err error) string {
 	if errors.As(err, &pgErr) {
 		switch pgErr.Code {
 		case "23503":
-			return "fk_violation(23503,父exploration不存在)"
+			return "fk_violation(23503,exploration induk tidak ada)"
 		case "23505":
 			return "unique_violation(23505)"
 		default:
@@ -64,13 +64,17 @@ func preview(s string, n int) string {
 	return string(r)
 }
 
-// model_error（provider/API 故障：LLM 层瞬时重试耗尽，或流已开始后中途断流）
-// 收场的 work 不是「试过没做完」也不是真失败，而是外部抖动。默认把它当永久
-// blocked 会白丢一条意图，所以这里对该终态额外重跑几次，每次之间退避一下，给
-// provider 恢复的时间；重试期间若被暂停/终止/取消则立即让位给对应分支处理。
+// Work yang berakhir dengan model_error (gangguan provider/API: retry sesaat di
+// lapisan LLM sudah habis, atau stream yang sudah mulai putus di tengah jalan)
+// bukan "sudah dicoba tapi belum selesai" dan juga bukan kegagalan sungguhan,
+// melainkan gangguan dari luar. Kalau langsung dianggap blocked permanen, satu
+// intent akan hilang percuma, jadi status akhir ini diberi beberapa kali retry
+// tambahan dengan jeda di antaranya, supaya provider punya waktu untuk pulih;
+// kalau selama retry ini work dipause/dihentikan/dibatalkan, langsung serahkan
+// ke cabang penanganan yang sesuai.
 const (
-	modelErrorRetries      = 2               // model_error 收场后额外重试的次数
-	modelErrorRetryBackoff = 3 * time.Second // 每次重试前的退避
+	modelErrorRetries      = 2               // jumlah retry tambahan setelah berakhir dengan model_error
+	modelErrorRetryBackoff = 3 * time.Second // jeda sebelum setiap retry
 	workControlWaitTimeout = 30 * time.Second
 )
 
@@ -136,12 +140,12 @@ type Engine struct {
 
 	plannerRound sync.Map // taskID -> int, planner round counter (for UI round separators)
 
-	// 任务级超时(见 docs/任务级超时与收尾设计.md):
-	settling     sync.Map // taskID -> bool, 任务已进入收尾时序(停止派/领新意图)
-	deadline     sync.Map // taskID -> int64 unix, 绝对截止时刻(首次运行时盖章;0/缺省=不限)
-	stamped      sync.Map // taskID -> bool, first_run_at 是否已盖章(本进程内只盖一次)
-	inflight     sync.Map // taskID -> *int64, 在跑的 planner.Plan + worker.Execute 计数(用于 drain)
-	coordStarted sync.Map // taskID -> bool, deadline 协调器是否已启动(Run/reload 去重)
+	// Timeout tingkat tugas (lihat docs/desain-timeout-dan-penyelesaian-tugas.md):
+	settling     sync.Map // taskID -> bool, tugas sudah masuk tahap penyelesaian (berhenti membagikan/mengambil intent baru)
+	deadline     sync.Map // taskID -> int64 unix, batas waktu absolut (dicatat saat run pertama; 0/default = tanpa batas)
+	stamped      sync.Map // taskID -> bool, apakah first_run_at sudah dicatat (hanya dicatat sekali per proses)
+	inflight     sync.Map // taskID -> *int64, jumlah planner.Plan + worker.Execute yang masih berjalan (dipakai untuk drain)
+	coordStarted sync.Map // taskID -> bool, apakah koordinator deadline sudah berjalan (deduplikasi Run/reload)
 
 	// resolve returns a task's dedicated planner/worker (wired by the server as the
 	// authoritative task-router). nil,nil means this task is deliberately unavailable
@@ -435,11 +439,11 @@ func (e *Engine) ControlWork(ctx context.Context, intentID int64, action string)
 	run := e.work[intentID]
 	if run == nil {
 		e.workMu.Unlock()
-		return fmt.Errorf("%w: 意图 %d 当前没有运行中的 work（可能已结束或未被领取）", errWorkControlConflict, intentID)
+		return fmt.Errorf("%w: intent %d saat ini tidak punya work yang berjalan (mungkin sudah selesai atau belum diambil)", errWorkControlConflict, intentID)
 	}
 	if run.action != "" {
 		e.workMu.Unlock()
-		return fmt.Errorf("%w: 意图 %d 正在执行 %s 操作", errWorkControlConflict, intentID, run.action)
+		return fmt.Errorf("%w: intent %d sedang menjalankan operasi %s", errWorkControlConflict, intentID, run.action)
 	}
 	run.action = action
 	done := run.done
@@ -457,10 +461,10 @@ func (e *Engine) ControlWork(ctx context.Context, intentID int64, action string)
 		return err
 	case <-ctx.Done():
 		e.releaseWorkControl(intentID, run, action)
-		return fmt.Errorf("等待意图 %d %s 收尾: %w", intentID, action, ctx.Err())
+		return fmt.Errorf("menunggu penyelesaian %s untuk intent %d: %w", action, intentID, ctx.Err())
 	case <-timer.C:
 		e.releaseWorkControl(intentID, run, action)
-		return fmt.Errorf("等待意图 %d %s 收尾: %w", intentID, action, context.DeadlineExceeded)
+		return fmt.Errorf("menunggu penyelesaian %s untuk intent %d: %w", action, intentID, context.DeadlineExceeded)
 	}
 }
 
@@ -482,7 +486,7 @@ func transitionIntentState(store *db.ExplorationStore, intentID int64, expected,
 		return err
 	}
 	if !changed {
-		return fmt.Errorf("%w: 意图 %d 不再是 %s 状态", db.ErrIntentStateConflict, intentID, expected)
+		return fmt.Errorf("%w: intent %d sudah bukan status %s lagi", db.ErrIntentStateConflict, intentID, expected)
 	}
 	return nil
 }
@@ -492,13 +496,13 @@ func transitionIntentState(store *db.ExplorationStore, intentID int64, expected,
 // re-plans — no kill. Errors if no work is currently running that intent.
 func (e *Engine) SteerWork(intentID int64, msg string) error {
 	if strings.TrimSpace(msg) == "" {
-		return fmt.Errorf("纠偏消息不能为空")
+		return fmt.Errorf("pesan koreksi arah tidak boleh kosong")
 	}
 	e.workMu.Lock()
 	running := e.work[intentID] != nil
 	e.workMu.Unlock()
 	if !running {
-		return fmt.Errorf("意图 %d 当前没有运行中的 work（可能已结束或未被领取）", intentID)
+		return fmt.Errorf("intent %d saat ini tidak punya work yang berjalan (mungkin sudah selesai atau belum diambil)", intentID)
 	}
 	e.steerMu.Lock()
 	e.steerBox[intentID] = append(e.steerBox[intentID], msg)
@@ -527,38 +531,55 @@ func (e *Engine) drainSteer(intentID int64) (string, bool) {
 // before each tool call it drains a queued course-correction (if any) and blocks the
 // call, handing the message back to the model — which re-plans its next step instead
 // of running the tool. No queued message → the guard behaves exactly as before.
-// 它同时负责「空转回合」的续跑，见 Stop。
+// steerHooks juga menangani perpanjangan untuk "putaran kosong", lihat Stop.
 type steerHooks struct {
 	inner harness.HookRunner
 	drain func() (string, bool)
-	// nudges 是本条意图已注入的空转续跑次数，上限 limit。指针:harness 持有的是
-	// steerHooks 的值拷贝，计数必须共享同一份。
+	// nudges adalah jumlah perpanjangan putaran kosong yang sudah disuntikkan untuk
+	// intent ini, dengan batas atas limit. Catatan soal pointer: harness memegang
+	// salinan nilai dari steerHooks, jadi hitungan ini harus berbagi instance yang sama.
 	nudges *atomic.Int64
-	// limit 是空转续跑的次数上限，由 Engine.emptyTurnNudgeLimit() 从「空响应重试
-	// 次数」解析而来。<=0 = 不介入(用户显式关掉了这层)。
+	// limit adalah batas maksimum jumlah perpanjangan putaran kosong, diambil dari
+	// "jumlah retry respons kosong" lewat Engine.emptyTurnNudgeLimit(). <=0 berarti
+	// fitur ini tidak aktif (dimatikan secara eksplisit oleh pengguna).
 	limit int
-	// label 形如 "worker-1 · #42"，只用于日志。
+	// label berbentuk seperti "worker-1 · #42", hanya dipakai untuk log.
 	label string
 }
 
-// 空转回合(只有思考、既无正文也无工具调用)续跑次数的默认值，与 SDK 空响应重试的
-// 内置默认(norma/llm/openai.go 的 emptyResponseRetries)保持一致——两层共用同一个
-// 旋钮，不配置时的行为也该对齐。解析见 Engine.emptyTurnNudgeLimit。
+// defaultEmptyTurnNudges adalah nilai default jumlah perpanjangan untuk putaran
+// kosong (giliran yang hanya berisi thinking, tanpa teks maupun pemanggilan tool),
+// disamakan dengan default bawaan retry respons kosong di SDK (emptyResponseRetries
+// di norma/llm/openai.go) karena kedua lapisan ini berbagi satu pengaturan yang
+// sama, jadi perilaku defaultnya pun harus selaras. Lihat Engine.emptyTurnNudgeLimit
+// untuk cara nilainya diambil.
 //
-// 注意这个数是「一条意图的总量」，不是「连续几次」:harness 自身的 stopHookActive
-// 已经限死了连续空转只推一次——推完那一轮若还是空转，Stop 钩子不会再被调到，run 直接
-// 收场;只有真正发生过一次工具回合，配额才刷新(norma/harness/query.go:534)。所以这个
-// 闸挡的是「工具 → 空转 → 推 → 工具 → 空转」这种病态循环，别让它把意图预算耗光。
+// Catatan: angka ini adalah "total untuk satu intent", bukan "berapa kali
+// berturut-turut". stopHookActive milik harness sendiri sudah membatasi agar
+// putaran kosong yang berturut-turut hanya didorong sekali, setelah itu kalau
+// masih kosong hook Stop tidak akan dipanggil lagi dan run langsung berakhir;
+// kuota ini baru di-refresh setelah benar-benar terjadi satu putaran tool
+// (norma/harness/query.go:534). Jadi batasan ini menjaga agar siklus bermasalah
+// seperti "tool -> kosong -> dorong -> tool -> kosong" tidak menghabiskan jatah
+// intent.
 const defaultEmptyTurnNudges = 2
 
-// emptyTurnNudge 是空转回合注入的续跑指令。
+// emptyTurnNudge adalah instruksi perpanjangan yang disuntikkan untuk putaran kosong.
 //
-// 这种回合在 harness 眼里是一次自然结束(stop_reason=end_turn 且无 tool_use)，五层
-// LLM 重试一层都不适用——它不是错误，是模型「想完了但没动手」。SDK 的空响应重试也
-// 够不着:它以「有没有 yield 过事件」判空，而思考增量本身就是事件(norma/llm/openai.go
-// 的 SEThinkingDelta)，所以 thinking-only 不算空。何况那层是原样重发整个 prompt，
-// 对这种由上下文形状决定的空转，重发只会让模型再想一遍。这里换成追加一条指令，让它
-// 带着已经产出的思考继续，输入变了才有理由给出不同的行为。
+// Di mata harness, putaran seperti ini dianggap selesai secara alami
+// (stop_reason=end_turn dan tidak ada tool_use), jadi tidak satu pun dari lima
+// lapisan retry LLM yang cocok diterapkan, karena ini bukan error, melainkan
+// model yang "sudah selesai berpikir tapi belum bertindak". Retry respons kosong
+// milik SDK juga tidak menjangkau kasus ini: SDK menilai kosong berdasarkan
+// "apakah pernah ada event yang di-yield", dan delta thinking itu sendiri sudah
+// terhitung event (SEThinkingDelta di norma/llm/openai.go), jadi turn yang hanya
+// berisi thinking tidak dianggap kosong oleh SDK. Lagipula lapisan itu mengirim
+// ulang seluruh prompt apa adanya, padahal untuk putaran kosong yang disebabkan
+// oleh bentuk konteks seperti ini, pengiriman ulang hanya akan membuat model
+// berpikir ulang dari awal. Di sini pendekatannya diganti dengan menambahkan satu
+// instruksi tambahan, supaya model melanjutkan dari hasil pemikiran yang sudah
+// ada, karena perubahan pada input adalah alasan yang masuk akal untuk hasil yang
+// berbeda.
 const emptyTurnNudge = "【空转提醒】你上一轮只输出了思考过程，既没有给出正文回复，也没有调用任何工具，" +
 	"这一轮等于没有产出。请直接执行你刚才想好的下一步：要么调用工具，要么给出结论文字。不要重复思考。"
 
@@ -592,10 +613,13 @@ func (h steerHooks) PostToolUse(ctx context.Context, name string, input, result 
 	}
 }
 
-// Stop 在 guard 原有语义之上补一层「空转回合」续跑:模型只输出了思考、既没给正文
-// 也没调工具时，harness 会把它当成自然结束并以空 summary 收场(query.go 的
-// ReasonCompleted + asst.Text())，一条本来还没做完的意图就这样断在半路。此时注入
-// 一条续跑指令，让模型带着已有思考接着走。
+// Stop menambahkan satu lapisan perpanjangan "putaran kosong" di atas semantik
+// guard yang sudah ada: ketika model hanya mengeluarkan thinking, tanpa teks
+// maupun pemanggilan tool, harness akan menganggapnya selesai secara alami dan
+// mengakhirinya dengan summary kosong (ReasonCompleted + asst.Text() di query.go),
+// sehingga satu intent yang sebenarnya belum selesai jadi terputus di tengah jalan.
+// Pada titik ini disuntikkan satu instruksi perpanjangan, agar model melanjutkan
+// dari hasil pemikiran yang sudah ada.
 func (h steerHooks) Stop(ctx context.Context, messages []llm.Message) (bool, []string, string) {
 	var (
 		prevent  bool
@@ -605,17 +629,19 @@ func (h steerHooks) Stop(ctx context.Context, messages []llm.Message) (bool, []s
 	if h.inner != nil {
 		prevent, blocking, msg = h.inner.Stop(ctx, messages)
 	}
-	// inner 已经决定硬停、或已经要注入自己的续跑消息 → 尊重它，不再叠加。
-	// limit<=0 = 用户把「空响应重试次数」配成了 -1，即显式关掉这层。
+	// Kalau inner sudah memutuskan untuk berhenti total, atau sudah mau menyuntikkan
+	// pesan perpanjangannya sendiri, hormati keputusan itu dan jangan ditumpuk.
+	// limit<=0 berarti pengguna mengatur "jumlah retry respons kosong" ke -1, yaitu
+	// mematikan lapisan ini secara eksplisit.
 	if prevent || len(blocking) > 0 || h.nudges == nil || h.limit <= 0 || !isThinkingOnlyTurn(messages) {
 		return prevent, blocking, msg
 	}
 	n := h.nudges.Add(1)
 	if n > int64(h.limit) {
-		log.Printf("[work %s] 空转回合(仅思考、无正文无工具)已达续跑上限 %d，放行收场", h.label, h.limit)
+		log.Printf("[work %s] putaran kosong (hanya thinking, tanpa teks maupun tool) sudah mencapai batas perpanjangan %d, dibiarkan berakhir", h.label, h.limit)
 		return prevent, blocking, msg
 	}
-	log.Printf("[work %s] 空转回合(仅思考、无正文无工具)，注入续跑指令 (%d/%d)", h.label, n, h.limit)
+	log.Printf("[work %s] putaran kosong (hanya thinking, tanpa teks maupun tool), menyuntikkan instruksi perpanjangan (%d/%d)", h.label, n, h.limit)
 	return false, []string{emptyTurnNudge}, ""
 }
 
@@ -626,7 +652,7 @@ func (e *Engine) KillWork(intentID int64) error {
 	run := e.work[intentID]
 	e.workMu.Unlock()
 	if run == nil {
-		return fmt.Errorf("意图 %d 当前没有运行中的 work（可能已结束或未被领取）", intentID)
+		return fmt.Errorf("intent %d saat ini tidak punya work yang berjalan (mungkin sudah selesai atau belum diambil)", intentID)
 	}
 	run.cancel(agent.AbortKilledByPlanner)
 	return nil
@@ -640,12 +666,13 @@ func (e *Engine) Broadcaster() *Broadcaster { return e.bc }
 func (e *Engine) emitActivity(t *Task, r db.Activity) db.Activity {
 	id, err := e.appendActivity(t, r)
 	if err != nil {
-		// NO LONGER SILENT: dropping a record breaks command↔result pairing in the
-		// trace — a tool_use whose tool_result was lost shows as "执行中" forever, and
-		// a lost 'result'/'round' record leaves the session with no summary ("无总结").
-		// Everything needed to分析根因 goes into ONE error-level line: reason class,
-		// summary preview, running drop count for this task, and — on the FK case — a
-		// live probe of WHY the parent exploration is unreachable.
+		// TIDAK LAGI DIAM-DIAM: record yang hilang merusak pemasangan command<->result di
+		// trace, tool_use yang tool_result-nya hilang akan tampil "sedang berjalan" selamanya,
+		// dan record 'result'/'round' yang hilang membuat session tanpa ringkasan sama sekali.
+		// Semua yang diperlukan untuk menganalisis akar masalah dirangkum dalam SATU baris
+		// level error: jenis penyebab, cuplikan summary, jumlah drop berjalan untuk task ini,
+		// dan, khusus untuk kasus FK, hasil pemeriksaan langsung ke DB untuk tahu MENGAPA
+		// exploration induknya tidak terjangkau.
 		n := e.bumpDrop(t.ID)
 		diag := ""
 		// On the FK-parent failure (23503) probe the live DB so the log records WHY the
@@ -653,13 +680,13 @@ func (e *Engine) emitActivity(t *Task, r db.Activity) db.Activity {
 		if isFKViolation(err) {
 			storeID := t.Store.ID()
 			if exists, refs, maxID, dErr := e.m.pg.ExplorationDiag(storeID); dErr != nil {
-				diag = fmt.Sprintf(" | FK诊断查询失败(store.expID=%d task.ExpID=%d): %v", storeID, t.ExpID, dErr)
+				diag = fmt.Sprintf(" | query diagnosis FK gagal(store.expID=%d task.ExpID=%d): %v", storeID, t.ExpID, dErr)
 			} else {
-				diag = fmt.Sprintf(" | FK诊断: store.expID=%d task.ExpID=%d exploration存在=%v 引用它的task数=%d MAX(exploration.id)=%d",
+				diag = fmt.Sprintf(" | diagnosis FK: store.expID=%d task.ExpID=%d exploration ada=%v jumlah task yang mereferensikannya=%d MAX(exploration.id)=%d",
 					storeID, t.ExpID, exists, refs, maxID)
 			}
 		}
-		log.Printf("[activity] task %s 丢弃活动记录(该任务累计第 %d 条) worker=%s kind=%s tool=%s tuid=%s reason=%s summary=%q: %v%s",
+		log.Printf("[activity] task %s membuang record aktivitas (ini yang ke-%d untuk task ini) worker=%s kind=%s tool=%s tuid=%s reason=%s summary=%q: %v%s",
 			t.ID, n, r.Worker, r.Kind, r.Tool, r.ToolUseID, dropReason(err), preview(r.Summary, 80), err, diag)
 		e.touch(t.ID)
 		return r
@@ -684,12 +711,12 @@ func (e *Engine) appendActivity(t *Task, r db.Activity) (int64, error) {
 	for attempt := 1; attempt <= 3; attempt++ {
 		if id, err = t.Store.AppendActivity(r); err == nil {
 			if attempt > 1 {
-				log.Printf("[activity] task %s 写入第 %d 次重试成功 (worker=%s kind=%s tool=%s)",
+				log.Printf("[activity] task %s berhasil ditulis pada percobaan ulang ke-%d (worker=%s kind=%s tool=%s)",
 					t.ID, attempt, r.Worker, r.Kind, r.Tool)
 			}
 			return id, nil
 		}
-		log.Printf("[activity] task %s 写入失败 (第 %d/3 次, worker=%s kind=%s tool=%s expID=%d): %v",
+		log.Printf("[activity] task %s gagal ditulis (percobaan %d/3, worker=%s kind=%s tool=%s expID=%d): %v",
 			t.ID, attempt, r.Worker, r.Kind, r.Tool, t.Store.ID(), err)
 		time.Sleep(time.Duration(attempt) * 25 * time.Millisecond)
 	}
@@ -765,28 +792,35 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 		name := fmt.Sprintf("work#%d", i+1)
 		runTaskRoutine(rt, func(loopCtx context.Context) { e.workerLoop(loopCtx, t, name) })
 	}
-	e.startDeadlineCoordinator(ctx, t) // 任务级超时定时器(仅 timeout>0;去重)
-	// 仅在「完全没有活动意图(open+running)」时才 kick 首轮规划。带种子意图的任务:种子已
-	// 是 open,或已被上面刚起的 worker 抢先 claim 成 running——两种都算「有活干」,一律跳过
-	// 首轮 planner,worker 直接领种子意图开跑,跑完由 NotifyDone/心跳唤醒 planner。
-	// ⚠️ 不能用 Frontier(只数 open):worker 领取(open→running)与本检查存在竞态,会误 kick。
-	// 重启自动恢复时也可能只剩 running 意图,同样应跳过。
+	e.startDeadlineCoordinator(ctx, t) // timer timeout tingkat tugas (hanya bila timeout>0; dideduplikasi)
+	// Hanya kick ronde perencanaan pertama kalau benar-benar "tidak ada intent aktif
+	// (open+running)". Tugas dengan seed intent: seed-nya sudah berstatus open, atau
+	// sudah lebih dulu diklaim jadi running oleh worker yang baru dijalankan di atas,
+	// dua kondisi ini sama-sama berarti "sudah ada yang dikerjakan", jadi ronde planner
+	// pertama dilewati dan worker langsung mengambil seed intent untuk berjalan;
+	// setelah selesai, planner dibangunkan lewat NotifyDone/heartbeat.
+	// Peringatan: tidak bisa pakai Frontier (yang hanya menghitung open) karena ada
+	// race antara pengambilan worker (open->running) dan pengecekan ini, yang bisa
+	// memicu kick yang salah. Saat auto-recovery setelah restart pun bisa jadi hanya
+	// tersisa intent berstatus running, kondisi ini juga harus dilewati.
 	if has, _ := t.Store.HasActiveIntent(); !has {
 		t.Notify() // kick the first planning round (acted on once LLM is ready)
 	}
 }
 
-// plannerHeartbeatInterval 解析任务的 planner 心跳间隔。db.CreateTask 已归一
-// (低于 600 一律抬到 600);这里再兜一次底,防内存态异常值。
+// plannerHeartbeatInterval mengambil interval heartbeat planner untuk sebuah tugas.
+// db.CreateTask sudah menormalkannya (nilai di bawah 600 selalu dinaikkan ke 600);
+// di sini diberi jaring pengaman tambahan untuk mencegah nilai aneh di state memori.
 func plannerHeartbeatInterval(t *Task) time.Duration {
 	sec := t.PlanHeartbeatSeconds
-	if sec < db.MinPlanHeartbeatSeconds { // 下限=默认=600(10min)
+	if sec < db.MinPlanHeartbeatSeconds { // batas bawah = default = 600 (10 menit)
 		sec = db.MinPlanHeartbeatSeconds
 	}
 	return time.Duration(sec) * time.Second
 }
 
-// resetPlannerTimer 安全重臂一个可能已触发的 Timer(标准 Stop→drain→Reset 模式)。
+// resetPlannerTimer menata ulang secara aman sebuah Timer yang mungkin sudah
+// terpicu (pola standar Stop->drain->Reset).
 func resetPlannerTimer(timer *time.Timer, d time.Duration) {
 	if !timer.Stop() {
 		select {
@@ -799,13 +833,18 @@ func resetPlannerTimer(timer *time.Timer, d time.Duration) {
 
 func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 	interval := plannerHeartbeatInterval(t)
-	// 心跳定时器在 loop 入口臂 = 从任务 start 计时:即使是跳过首轮 planner 的 seed 任务
-	// (Run 里 frontier 非空不 kick 首轮)、这里一直阻塞,心跳也会在「任务 start + interval」
-	// 触发第一轮规划。之后每次唤醒(边沿/心跳)都重臂 = 距上次任意规划触发的时长。
+	// Timer heartbeat ditata ulang begitu masuk loop, artinya mulai menghitung dari
+	// saat tugas start: walaupun ini adalah seed task yang melewati ronde planner
+	// pertama (Run tidak mengirim kick pertama kalau frontier tidak kosong) dan di
+	// sini terus blocking, heartbeat tetap akan memicu ronde perencanaan pertama pada
+	// titik "start tugas + interval". Setelah itu setiap kali dibangunkan (oleh event
+	// lain atau heartbeat) timer ditata ulang lagi, yaitu dihitung dari pemicu
+	// perencanaan terakhir, apa pun jenisnya.
 	heartbeat := time.NewTimer(interval)
 	defer heartbeat.Stop()
 
-	// runRound 跑一轮规划(含 debounce 合并 + 各 guard)。src 仅用于日志区分触发来源。
+	// runRound menjalankan satu ronde perencanaan (termasuk penggabungan debounce +
+	// berbagai guard). src hanya dipakai untuk membedakan sumber pemicu di log.
 	runRound := func(src string) {
 		// debounce: coalesce a burst of changes into one planning round
 		timer := time.NewTimer(e.debounce)
@@ -833,45 +872,52 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		if isTerminalStatus(t.lifecycleSnapshot().Status) {
 			return
 		}
-		// 任务级超时收尾中:丢弃普通唤醒——worker 收尾写回、Resume 的 Notify 都不再
-		// 触发常规规划轮;终局那一轮由协调器(settleTask)直接驱动,不走这里。
+		// Tugas sedang dalam proses penyelesaian timeout tingkat tugas: abaikan
+		// pembangunan biasa, karena baik penulisan penyelesaian worker maupun Notify
+		// dari Resume tidak lagi memicu ronde perencanaan reguler; ronde penutup
+		// justru dikendalikan langsung oleh koordinator (settleTask), tidak lewat sini.
 		if e.isSettling(t.ID) {
 			return
 		}
-		// goalless（人工直投）分支：任务已无 open 目标时 planner 不跑——跑了会重判
-		// met→cancelExec 杀掉用户经主 agent 直投的意图。是否结束改由 frontier 决定：
-		// 还有 open/running 意图 → 保持 running、静默等待；意图已全部跑干 → 落 done。
-		// 整段纯 Go、不触发任何 LLM 调用，也不打规划轮 marker。
+		// Cabang goalless (intent yang disuntik manual langsung oleh pengguna):
+		// planner tidak dijalankan saat tugas sudah tidak punya goal open, karena
+		// kalau dijalankan akan menilai ulang met->cancelExec dan membunuh intent
+		// yang disuntik pengguna lewat agent utama. Selesai atau tidaknya ditentukan
+		// oleh frontier: masih ada intent open/running -> tetap running, menunggu
+		// diam-diam; semua intent sudah habis dijalankan -> ditutup jadi done.
+		// Seluruh blok ini murni Go, tidak memicu panggilan LLM apa pun, dan tidak
+		// menambahkan marker ronde perencanaan.
 		if open, err := t.Store.HasOpenGoal(); err == nil && !open {
-			t.drainTriggers() // 丢弃累积的 done/finding 触发，避免 goalless 长会话里无界增长
+			t.drainTriggers() // buang trigger done/finding yang terkumpul, agar tidak menumpuk tanpa batas di sesi goalless yang panjang
 			if active, err := t.Store.HasActiveIntent(); err == nil && !active {
-				// frontier 抽干且无在跑意图 → 收尾。用 Guarded 版做 CAS，避免踩到并发的
-				// pause/delete/超时收尾的状态转换。
+				// Frontier sudah habis dan tidak ada intent yang berjalan -> tutup tugas.
+				// Pakai versi Guarded untuk CAS, agar tidak bertabrakan dengan transisi
+				// status pause/delete/penyelesaian timeout yang berjalan bersamaan.
 				if won, err := e.m.SetTaskStatusGuarded(t.ID, "done"); err != nil {
-					log.Printf("[goalless] task %s 收尾落 done 失败: %v", t.ID, err)
+					log.Printf("[goalless] task %s gagal menutup status menjadi done: %v", t.ID, err)
 				} else if won {
 					e.emitActivity(t, db.Activity{Worker: "system", Kind: "text",
-						Summary: "目标已全部达成，直投意图已执行完毕，任务结束"})
+						Summary: "Semua tujuan sudah tercapai, intent yang disuntik langsung sudah selesai dijalankan, tugas berakhir"})
 				}
 			}
-			return // goalless 分支永不进入 planner.Plan
+			return // cabang goalless tidak pernah masuk ke planner.Plan
 		}
 		if !e.beginTaskOperation(t.ID) {
 			return
 		}
 		defer e.decInflight(t.ID)
-		e.stampFirstRun(t) // 首次真正规划 → 盖 first_run_at + 算 deadline(仅带 timeout 的任务)
+		e.stampFirstRun(t) // perencanaan pertama yang sungguhan -> catat first_run_at + hitung deadline (hanya untuk tugas yang punya timeout)
 		e.touch(t.ID)
 		emit := func(r db.Activity) { e.emitActivity(t, r) }
-		ectx := e.clockCtx(e.execContextFor(ctx, t.ID), t, false) // cancellable by Pause; 带任务 deadline
+		ectx := e.clockCtx(e.execContextFor(ctx, t.ID), t, false) // bisa dibatalkan oleh Pause; membawa deadline tugas
 		if ectx.Err() != nil || e.IsDeleting(t.ID) {
 			return
 		}
-		log.Printf("[planner] task %s 规划中…(%s 触发)", t.ID, src)
+		log.Printf("[planner] task %s sedang merencanakan...(dipicu oleh %s)", t.ID, src)
 		// round marker: each Plan() is one planner round; emit a boundary so the
 		// UI can separate rounds in the transcript (kind='round').
 		e.emitActivity(t, db.Activity{Worker: "planner", Kind: "round",
-			Summary: fmt.Sprintf("第 %d 轮规划", e.nextPlannerRound(t.ID))})
+			Summary: fmt.Sprintf("Ronde perencanaan ke-%d", e.nextPlannerRound(t.ID))})
 		// what fired this round (worker done / finding; may be several — debounce
 		// coalesces a burst; empty for time/heartbeat wakes).
 		triggers := t.drainTriggers()
@@ -881,19 +927,23 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		e.EndLLMCall(t.ID)
 		switch {
 		case err != nil && ectx.Err() == nil:
-			log.Printf("[planner] task %s 规划出错: %v", t.ID, err)
+			log.Printf("[planner] task %s mengalami error saat merencanakan: %v", t.ID, err)
 		case met:
-			log.Printf("[planner] task %s 判定目标达成: %s", t.ID, reason)
-			// 所有目标达成 → 持久化任务状态为 done（前端 DTO 会优先展示该终态）。
+			log.Printf("[planner] task %s dinilai sudah mencapai tujuan: %s", t.ID, reason)
+			// Semua tujuan tercapai -> simpan status tugas menjadi done secara permanen
+			// (DTO di frontend akan memprioritaskan menampilkan status akhir ini).
 			if err := e.m.SetTaskStatus(t.ID, "done"); err != nil {
-				log.Printf("[planner] task %s 标记完成落库失败: %v", t.ID, err)
+				log.Printf("[planner] task %s gagal menyimpan status selesai ke database: %v", t.ID, err)
 			}
-			// 任务已判完成 → 立刻取消在跑的 worker：它们手头的意图跑出来也没意义了。
-			// 下一轮 worker 循环撞终态门就不再领新意图;被取消的这批走下方"任务已完成"分支
-			// 归为 stopped(而非 blocked)。
+			// Tugas sudah dinilai selesai -> langsung batalkan worker yang masih
+			// berjalan, karena intent yang sedang mereka kerjakan sudah tidak ada
+			// artinya lagi. Ronde worker berikutnya akan membentur gerbang status
+			// akhir dan tidak mengambil intent baru lagi; batch yang dibatalkan ini
+			// masuk ke cabang "tugas sudah selesai" di bawah dan dikategorikan
+			// sebagai stopped (bukan blocked).
 			e.cancelExec(t.ID, agent.AbortGoalMet)
 		default:
-			log.Printf("[planner] task %s 规划完成", t.ID)
+			log.Printf("[planner] task %s selesai merencanakan", t.ID)
 		}
 		e.touch(t.ID)
 	}
@@ -903,12 +953,14 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		case <-ctx.Done():
 			return
 		case <-t.notify:
-			runRound("edge") // worker 结束 / finding / kill / resume / seed 首轮
+			runRound("edge") // worker selesai / finding / kill / resume / ronde pertama seed
 		case <-heartbeat.C:
-			// 周期兜底:死锁兜底 + 唤醒去监督飞行中的 worker(steer/kill) + 周期复查。
+			// Jaring pengaman berkala: mencegah deadlock + membangunkan untuk mengawasi
+			// worker yang sedang berjalan (steer/kill) + pengecekan ulang berkala.
 			runRound("heartbeat")
 		}
-		// 每次唤醒(边沿或心跳)后重臂心跳:任意规划触发都重算这段静置计时。
+		// Setiap kali dibangunkan (oleh event atau heartbeat), timer heartbeat ditata
+		// ulang: pemicu perencanaan apa pun menghitung ulang periode diam ini.
 		resetPlannerTimer(heartbeat, interval)
 	}
 }
@@ -940,13 +992,13 @@ func (e *Engine) workerLoop(ctx context.Context, t *Task, name string) {
 			if sleepCtx(ctx, 1000*time.Millisecond) {
 				return
 			}
-			continue // 任务超时收尾中:不再领新意图(在跑的自行收尾,协调器等其 drain)
+			continue // tugas dalam proses penyelesaian timeout: tidak mengambil intent baru lagi (yang berjalan menyelesaikan sendiri, koordinator menunggu drain-nya)
 		}
 		if isTerminalStatus(e.m.TaskStatus(t.ID)) {
 			if sleepCtx(ctx, 1000*time.Millisecond) {
 				return
 			}
-			continue // 任务已终态(done/failed/timeout):停止领取遗留意图,别在完成后空跑 frontier
+			continue // tugas sudah di status akhir (done/failed/timeout): berhenti mengambil intent yang tersisa, jangan menjalankan frontier dengan percuma setelah selesai
 		}
 		if !e.beginTaskOperation(t.ID) {
 			return
@@ -967,7 +1019,7 @@ func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker
 	if intent == nil {
 		return false
 	}
-	log.Printf("[worker %s] task %s 领取意图 #%d", name, t.ID, intent.ID)
+	log.Printf("[worker %s] task %s mengambil intent #%d", name, t.ID, intent.ID)
 	return e.runIntent(ctx, t, name, worker, intent, "", "")
 }
 
@@ -981,13 +1033,13 @@ func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker
 // cannot observe quiescence between the LLM return and the final DB writes.
 func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *agent.Worker, intent *db.Node, requestID, message string) bool {
 	hasChatMessage := message != ""
-	e.stampFirstRun(t) // 首次真正执行 → 盖 first_run_at + 算 deadline(仅带 timeout 的任务)
+	e.stampFirstRun(t) // eksekusi pertama yang sungguhan -> catat first_run_at + hitung deadline (hanya untuk tugas yang punya timeout)
 	e.touch(t.ID)
 	emit := func(r db.Activity) { e.emitActivity(t, r) }
-	ectx := e.clockCtx(e.execContextFor(ctx, t.ID), t, false) // cancellable by Pause; 带任务 deadline
+	ectx := e.clockCtx(e.execContextFor(ctx, t.ID), t, false) // bisa dibatalkan oleh Pause; membawa deadline tugas
 	if ectx.Err() != nil || e.IsDeleting(t.ID) {
 		if err := transitionIntentState(t.Store, intent.ID, "running", "open"); err != nil {
-			log.Printf("[worker %s] task %s 意图 #%d 领取后回退失败: %v", name, t.ID, intent.ID, err)
+			log.Printf("[worker %s] task %s intent #%d gagal dikembalikan setelah diambil: %v", name, t.ID, intent.ID, err)
 		}
 		return true
 	}
@@ -1004,8 +1056,9 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	}
 	label := fmt.Sprintf("%s · #%d", name, iid)
 	workCtx = intercept.WithTaskContext(workCtx, t.ID, label, taskEmit)
-	// nudges 有意建在 model_error 重跑循环之外:空转续跑的上限是「这条意图」的总量，
-	// 重跑一轮不该把额度清零重来。
+	// nudges sengaja dibuat di luar loop percobaan ulang model_error: batas atas
+	// perpanjangan putaran kosong adalah total untuk "intent ini", jadi satu kali
+	// percobaan ulang tidak boleh mengosongkan dan mengulang kuotanya dari nol.
 	hooks := steerHooks{
 		inner:  t.Guard.Hooks(),
 		drain:  func() (string, bool) { return e.drainSteer(iid) },
@@ -1024,17 +1077,20 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		reason, wrote, err = worker.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding)
 	}
 	e.EndLLMCall(t.ID)
-	// model_error 收场 → 额外重跑几次（退避后再试）。仅在意图仍属本 work、任务
-	// 未暂停/未终止/未取消【且未进入收尾】时重试；否则让位给对应分支处理(收尾期不
-	// 再重试,避免退避挤占其他 worker 的优雅收尾窗口)。
+	// Berakhir dengan model_error -> coba lagi beberapa kali tambahan (dengan jeda
+	// sebelum setiap percobaan). Hanya di-retry selama intent ini masih milik work
+	// ini dan tugasnya belum dipause/dihentikan/dibatalkan serta belum masuk tahap
+	// penyelesaian; selain itu serahkan ke cabang penanganan yang sesuai (selama
+	// tahap penyelesaian tidak ada retry lagi, agar jeda retry tidak menyita jendela
+	// penyelesaian halus milik worker lain).
 	maxRetries, retryBackoff := e.modelErrorRetryPolicy()
 	for attempt := 1; attempt <= maxRetries &&
 		retryableWorkerModelError(reason, err) &&
 		workCtx.Err() == nil && ectx.Err() == nil && !e.IsPaused(t.ID) && !e.isSettling(t.ID); attempt++ {
-		log.Printf("[worker %s] task %s 意图 #%d model_error 收场，%v 后重试 (%d/%d)",
+		log.Printf("[worker %s] task %s intent #%d berakhir dengan model_error, mencoba lagi setelah %v (%d/%d)",
 			name, t.ID, intent.ID, retryBackoff, attempt, maxRetries)
 		if sleepCtx(workCtx, retryBackoff) {
-			break // 退避期间被取消（终止/暂停）→ 交给下方分支处理
+			break // dibatalkan selama jeda (dihentikan/dipause) -> serahkan ke cabang penanganan di bawah
 		}
 		e.BeginLLMCall(t.ID)
 		if hasChatMessage {
@@ -1068,10 +1124,10 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	if action == "pause" {
 		controlErr = transitionIntentState(t.Store, intent.ID, "running", "paused")
 		if controlErr != nil {
-			log.Printf("[worker %s] task %s 意图 #%d 暂停状态落库失败: %v", name, t.ID, intent.ID, controlErr)
+			log.Printf("[worker %s] task %s intent #%d gagal menyimpan status pause ke database: %v", name, t.ID, intent.ID, controlErr)
 			return true
 		}
-		log.Printf("[worker %s] task %s 意图 #%d 已暂停", name, t.ID, intent.ID)
+		log.Printf("[worker %s] task %s intent #%d telah dipause", name, t.ID, intent.ID)
 		e.touch(t.ID)
 		return true
 	}
@@ -1081,10 +1137,10 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		// a later cancel can finish cleanup instead of leaving a phantom running row.
 		controlErr = transitionIntentState(t.Store, intent.ID, "running", "paused")
 		if controlErr != nil {
-			log.Printf("[worker %s] task %s 意图 #%d 取消栅栏落库失败: %v", name, t.ID, intent.ID, controlErr)
+			log.Printf("[worker %s] task %s intent #%d gagal menyimpan status pembatalan ke database: %v", name, t.ID, intent.ID, controlErr)
 			return true
 		}
-		log.Printf("[worker %s] task %s 意图 #%d 已停止，等待取消清理", name, t.ID, intent.ID)
+		log.Printf("[worker %s] task %s intent #%d telah dihentikan, menunggu pembersihan pembatalan", name, t.ID, intent.ID)
 		e.touch(t.ID)
 		return true
 	}
@@ -1093,36 +1149,40 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	// conversation from its transcript instead of restarting from scratch.
 	if ectx.Err() != nil && taskExecutionPaused(context.Cause(ectx)) {
 		if err := transitionIntentState(t.Store, intent.ID, "running", "open"); err != nil {
-			log.Printf("[worker %s] task %s 意图 #%d 任务暂停回退失败: %v", name, t.ID, intent.ID, err)
+			log.Printf("[worker %s] task %s intent #%d gagal dikembalikan setelah tugas dipause: %v", name, t.ID, intent.ID, err)
 		}
 		return true
 	}
-	// 任务超时收尾的硬兜底 cancel(非 pause、非 kill)取消了本 run → 归为 exhausted(已收尾),
-	// 不要误标 blocked。此时 worker 通常已在 settlement 阶段把结果写回。
+	// Dibatalkan oleh jaring pengaman keras milik penyelesaian timeout tugas (bukan
+	// pause, bukan kill) -> kategorikan sebagai exhausted (sudah diselesaikan), jangan
+	// salah ditandai blocked. Pada titik ini worker biasanya sudah menulis balik
+	// hasilnya di tahap settlement.
 	if ectx.Err() != nil && e.isSettling(t.ID) {
 		if err := transitionIntentState(t.Store, intent.ID, "running", "exhausted"); err != nil {
-			log.Printf("[worker %s] task %s 意图 #%d 超时收尾状态落库失败: %v", name, t.ID, intent.ID, err)
+			log.Printf("[worker %s] task %s intent #%d gagal menyimpan status penyelesaian timeout ke database: %v", name, t.ID, intent.ID, err)
 		}
-		log.Printf("[worker %s] task %s 意图 #%d 因任务超时收尾结束(exhausted)，写回 %s", name, t.ID, intent.ID, wrote)
+		log.Printf("[worker %s] task %s intent #%d berakhir karena penyelesaian timeout tugas (exhausted), menulis balik %s", name, t.ID, intent.ID, wrote)
 		e.touch(t.ID)
 		return true
 	}
-	// 任务已判完成(done via 常规路径)→ 上面 cancelExec 取消了本 run。意图结果已无意义,
-	// 标 stopped(不是 blocked),别污染已完成任务的意图状态。
+	// Tugas sudah dinilai selesai (done lewat jalur normal) -> cancelExec di atas
+	// sudah membatalkan run ini. Hasil intent sudah tidak ada artinya, tandai
+	// stopped (bukan blocked), jangan mencemari status intent dari tugas yang
+	// sudah selesai.
 	if ectx.Err() != nil && isTerminalStatus(e.m.TaskStatus(t.ID)) {
 		if err := transitionIntentState(t.Store, intent.ID, "running", "stopped"); err != nil {
-			log.Printf("[worker %s] task %s 意图 #%d 终态停止落库失败: %v", name, t.ID, intent.ID, err)
+			log.Printf("[worker %s] task %s intent #%d gagal menyimpan status berhenti karena status akhir ke database: %v", name, t.ID, intent.ID, err)
 		}
-		log.Printf("[worker %s] task %s 意图 #%d 因任务已完成而取消(stopped)", name, t.ID, intent.ID)
+		log.Printf("[worker %s] task %s intent #%d dibatalkan karena tugas sudah selesai (stopped)", name, t.ID, intent.ID)
 		e.touch(t.ID)
 		return true
 	}
 	// killed by the planner: mark stopped (don't write back results, don't auto-reclaim).
 	if killed {
 		if err := transitionIntentState(t.Store, intent.ID, "running", "stopped"); err != nil {
-			log.Printf("[worker %s] task %s 意图 #%d planner 停止落库失败: %v", name, t.ID, intent.ID, err)
+			log.Printf("[worker %s] task %s intent #%d gagal menyimpan status berhenti karena dihentikan planner: %v", name, t.ID, intent.ID, err)
 		}
-		log.Printf("[worker %s] task %s 意图 #%d 被终止(stopped)", name, t.ID, intent.ID)
+		log.Printf("[worker %s] task %s intent #%d dihentikan (stopped)", name, t.ID, intent.ID)
 		e.touch(t.ID)
 		t.Notify()
 		return true
@@ -1130,27 +1190,29 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	if err != nil {
 		log.Printf("[worker %s] intent %d: %v", name, intent.ID, err)
 	}
-	// terminal分流：撞步数上限 ≠ 完成。max_turns→exhausted（规划者据此知道这个方向
-	// 试过但没真正做完、需换角度，而非当成已覆盖永久跳过）；出错→blocked；正常→done。
+	// Pencabangan status akhir: membentur batas jumlah langkah bukan berarti selesai.
+	// max_turns -> exhausted (supaya planner tahu arah ini sudah dicoba tapi belum
+	// benar-benar tuntas dan perlu ganti pendekatan, bukan dianggap sudah tercakup
+	// dan dilewati permanen); error -> blocked; normal -> done.
 	state := "done"
 	switch {
 	case err != nil:
 		state = "blocked"
 	case reason == harness.ReasonMaxTurns:
 		state = "exhausted"
-		log.Printf("[worker %s] intent %d 撞步数上限(exhausted)，本次写回 %s", name, intent.ID, wrote)
+		log.Printf("[worker %s] intent %d membentur batas jumlah langkah (exhausted), menulis balik %s", name, intent.ID, wrote)
 	case reason == harness.ReasonTimeout:
 		state = "exhausted"
-		log.Printf("[worker %s] intent %d 运行超时(exhausted)，收尾后写回 %s", name, intent.ID, wrote)
+		log.Printf("[worker %s] intent %d berjalan sampai timeout (exhausted), menulis balik %s setelah diselesaikan", name, intent.ID, wrote)
 	}
 	if state == "blocked" && isTaskLLMChainExhausted(err) {
 		_ = t.Store.SetIntentBlockedReason(intent.ID, db.IntentBlockedLLMQuota)
 	} else {
 		if stateErr := transitionIntentState(t.Store, intent.ID, "running", state); stateErr != nil {
-			log.Printf("[worker %s] task %s 意图 #%d 终态 %s 落库失败: %v", name, t.ID, intent.ID, state, stateErr)
+			log.Printf("[worker %s] task %s intent #%d gagal menyimpan status akhir %s ke database: %v", name, t.ID, intent.ID, state, stateErr)
 		}
 	}
-	log.Printf("[worker %s] task %s 意图 #%d 结束: %s (写回 %s)", name, t.ID, intent.ID, state, wrote)
+	log.Printf("[worker %s] task %s intent #%d berakhir: %s (menulis balik %s)", name, t.ID, intent.ID, state, wrote)
 	e.touch(t.ID)
 	t.NotifyDone(intent.ID) // results changed the graph -> wake the planner (with the just-finished intent id)
 	return true
@@ -1180,7 +1242,7 @@ func (e *Engine) runDetachedIntent(ctx context.Context, t *Task, intentID int64,
 	}()
 	_, worker := e.snapshotFor(t)
 	if worker == nil {
-		return fmt.Errorf("worker 尚未就绪")
+		return fmt.Errorf("worker belum siap")
 	}
 	node, err := t.Store.GetNode(intentID)
 	if err != nil {
@@ -1194,7 +1256,7 @@ func (e *Engine) runDetachedIntent(ctx context.Context, t *Task, intentID int64,
 		return err
 	}
 	if !changed {
-		return fmt.Errorf("%w: 意图不再是 paused 状态", db.ErrIntentStateConflict)
+		return fmt.Errorf("%w: intent sudah bukan status paused lagi", db.ErrIntentStateConflict)
 	}
 	node.State, node.Owner = "running", "chat"
 	// Record the human turn as a visible activity BEFORE the run starts, so it is

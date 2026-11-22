@@ -11,7 +11,7 @@ import (
 )
 
 // =====================================================================
-// 公司主体层
+// Lapisan entitas perusahaan
 // =====================================================================
 
 // Company is a row in the companies table.
@@ -52,8 +52,9 @@ var (
 )
 
 const (
-	// 企业范围不限制规则条数:逐个 IP / 域名录入的范围动辄上千条,封顶只会逼用户
-	// 拆成多个企业。请求体大小(server 侧 maxCompanyMutationBodyBytes)仍然兜底。
+	// Cakupan perusahaan tidak membatasi jumlah rule: input IP/domain satu per satu
+	// gampang mencapai ribuan baris, dan kalau dibatasi hanya memaksa user memecahnya
+	// jadi beberapa perusahaan. Ukuran body request (sisi server, maxCompanyMutationBodyBytes) tetap jadi batas pengaman.
 	//
 	// Raw and normalized textual scope payloads are bounded by Unicode rune
 	// count so multi-byte input is treated consistently by the API and DB layer.
@@ -69,12 +70,12 @@ func (e *CompanyScopeValidationError) Error() string { return e.Message }
 
 // ValidateCompanyScopeInputBounds applies request-wide limits before parsing.
 // Store methods call it again so non-HTTP callers cannot bypass the limits.
-// 只约束单条规则的长度,不限制条数。
+// Hanya membatasi panjang satu rule, tidak membatasi jumlah barisnya.
 func ValidateCompanyScopeInputBounds(inputs []ScopeInput) error {
 	for i, input := range inputs {
 		if utf8.RuneCountInString(input.Value) > MaxCompanyScopeRawRunes {
 			return &CompanyScopeValidationError{Message: fmt.Sprintf(
-				"企业范围第 %d 条原始值过长: 最多 %d 个字符", i+1, MaxCompanyScopeRawRunes,
+				"nilai mentah baris cakupan perusahaan ke-%d terlalu panjang: maksimal %d karakter", i+1, MaxCompanyScopeRawRunes,
 			)}
 		}
 	}
@@ -372,7 +373,7 @@ func (s *CompanyStore) AddScopeInputsChecked(companyID int64, inputs []ScopeInpu
 	if needsAttribution {
 		warning, err := recomputeAttributionTx(tx)
 		if err != nil {
-			return 0, 0, invalid, errors, fmt.Errorf("重新计算企业归属失败: %w", err)
+			return 0, 0, invalid, errors, fmt.Errorf("gagal menghitung ulang kepemilikan perusahaan: %w", err)
 		}
 		logAttributionWarning(warning)
 	}
@@ -400,12 +401,12 @@ func validateParsedScopeBounds(rules []ParsedScope) error {
 	for i, rule := range rules {
 		if utf8.RuneCountInString(rule.Raw) > MaxCompanyScopeRawRunes {
 			return &CompanyScopeValidationError{Message: fmt.Sprintf(
-				"企业范围第 %d 条原始值过长: 最多 %d 个字符", i+1, MaxCompanyScopeRawRunes,
+				"nilai mentah baris cakupan perusahaan ke-%d terlalu panjang: maksimal %d karakter", i+1, MaxCompanyScopeRawRunes,
 			)}
 		}
 		if utf8.RuneCountInString(rule.Value) > MaxCompanyScopeValueRunes {
 			return &CompanyScopeValidationError{Message: fmt.Sprintf(
-				"企业范围第 %d 条规范化值过长: 最多 %d 个字符", i+1, MaxCompanyScopeValueRunes,
+				"nilai ternormalisasi baris cakupan perusahaan ke-%d terlalu panjang: maksimal %d karakter", i+1, MaxCompanyScopeValueRunes,
 			)}
 		}
 	}
@@ -632,11 +633,11 @@ LIMIT $1`, malformedIPAssetsSampled)
 		return "", nil
 	}
 	warning := fmt.Sprintf(
-		"%d 条资产的 ip 字段不是合法 IP，已跳过 IP/CIDR 范围匹配（这些资产不会被网段规则归属到企业）：%s",
-		total, strings.Join(samples, "、"),
+		"field ip pada %d aset bukan IP yang sah, pencocokan rentang IP/CIDR dilewati (aset-aset ini tidak akan dikaitkan ke perusahaan lewat rule subnet): %s",
+		total, strings.Join(samples, ", "),
 	)
 	if total > len(samples) {
-		warning += fmt.Sprintf(" 等 %d 条", total)
+		warning += fmt.Sprintf(" dan %d lainnya", total)
 	}
 	return warning, nil
 }
@@ -670,7 +671,7 @@ func (s *CompanyStore) UpdateScopeInputsChecked(companyID int64, inputs []ScopeI
 	rules, invalid, errs := parseScopeInputs(inputs)
 	if invalid > 0 {
 		return 0, invalid, errs, &CompanyScopeValidationError{Message: fmt.Sprintf(
-			"企业范围包含 %d 条无效规则，未覆盖原有范围", invalid,
+			"cakupan perusahaan berisi %d rule tidak valid, cakupan lama tidak ditimpa", invalid,
 		)}
 	}
 	if err := validateParsedScopeBounds(rules); err != nil {
@@ -698,7 +699,7 @@ func (s *CompanyStore) UpdateScopeInputsChecked(companyID int64, inputs []ScopeI
 	// detach scope-derived assets or expose a lower-precedence company match.
 	warning, err := recomputeAttributionTx(tx)
 	if err != nil {
-		return 0, invalid, errs, fmt.Errorf("重新计算企业归属失败: %w", err)
+		return 0, invalid, errs, fmt.Errorf("gagal menghitung ulang kepemilikan perusahaan: %w", err)
 	}
 	logAttributionWarning(warning)
 	if err := tx.Commit(); err != nil {

@@ -32,10 +32,10 @@ import { ConfigField, FilterSummary } from "./_components/channel-form";
 import { DeliveryList } from "./_components/delivery-list";
 import { formatBacklog, StatTile } from "./_components/stat-tile";
 
-// 本页只负责编排：加载数据、维护表单状态、调用接口。
-// 字段定义与解析在 _components/channel-fields.ts，控件与过滤摘要在
-// _components/channel-form.tsx，投递记录在 _components/delivery-list.tsx——
-// 拆开是因为它们各自能被单独读懂，而挤在一个文件里时这个页面接近 1100 行。
+// Halaman ini hanya bertugas mengatur: memuat data, menjaga state form, memanggil API.
+// Definisi dan parsing field ada di _components/channel-fields.ts, kontrol dan ringkasan filter ada di
+// _components/channel-form.tsx, catatan pengiriman ada di _components/delivery-list.tsx.
+// Dipisah karena masing-masing bisa dipahami sendiri-sendiri, sementara kalau digabung dalam satu file halaman ini mendekati 1100 baris.
 export default function NotifyPage() {
   const [meta, setMeta] = React.useState<NotificationMeta | null>(null);
   const [channels, setChannels] = React.useState<NotificationChannel[]>([]);
@@ -59,13 +59,13 @@ export default function NotifyPage() {
         setBaseURL(m.public_base_url);
         setDigestMin(m.digest_interval_min);
       })
-      .catch((e) => toast.error("读取推送配置失败：" + (e as Error).message));
-    // 渠道列表加载失败要报出来：静默失败会显示成「一个渠道都没有」，
-    // 用户会以为配置丢了，比直接报错更让人慌。
+      .catch((e) => toast.error("Gagal memuat konfigurasi notifikasi: " + (e as Error).message));
+    // Kegagalan memuat daftar channel harus dilaporkan: kalau gagal diam-diam, tampilannya jadi seperti "tidak ada channel sama sekali",
+    // yang membuat user mengira konfigurasinya hilang, itu lebih membuat panik daripada langsung menampilkan error.
     api
       .notifyChannels()
       .then(setChannels)
-      .catch((e) => toast.error("读取渠道列表失败：" + (e as Error).message));
+      .catch((e) => toast.error("Gagal memuat daftar channel: " + (e as Error).message));
   }, []);
   React.useEffect(() => {
     load();
@@ -86,7 +86,7 @@ export default function NotifyPage() {
 
   function openEdit(ch: NotificationChannel) {
     setEditing(ch);
-    // filter 在后端是 Go 结构体，永远序列化成对象（不会是 null），所以不需要兜底。
+    // filter di backend adalah struct Go, selalu diserialisasi jadi objek (tidak akan null), jadi tidak perlu fallback.
     const f = ch.filter;
     setForm({
       name: ch.name,
@@ -94,8 +94,8 @@ export default function NotifyPage() {
       mode: ch.mode,
       enabled: ch.enabled,
       ratePerMin: String(ch.rate_per_min),
-      // 后端回显的 config 里凭据是掩码值；原样放进表单，提交时原样送回，
-      // 后端据此保留库中原值。
+      // Kredensial di dalam config yang dikembalikan backend berupa nilai masked; dimasukkan apa adanya ke form, dan saat submit dikirim balik apa adanya,
+      // backend akan mempertahankan nilai asli di database berdasarkan itu.
       config: { ...ch.config },
       minSeverity: f.min_severity ?? "",
       includeText: (f.vulnclass_include ?? []).join("\n"),
@@ -107,17 +107,17 @@ export default function NotifyPage() {
     setOpen(true);
   }
 
-  // buildConfig 把表单状态转成渠道 config。
+  // buildConfig mengubah state form jadi config channel.
   //
-  // 唯一的规则，两类值：
-  //   - 掩码值（"__masked__..."）原样送回 → 后端解读为「这个字段没改，保留库中原值」
-  //   - 其余一律按用户输入提交，空串即「清空该字段」
+  // Hanya ada satu aturan, untuk dua jenis nilai:
+  //   - Nilai masked ("__masked__...") dikirim balik apa adanya -> backend membacanya sebagai "field ini tidak diubah, pertahankan nilai asli di database"
+  //   - Selain itu selalu dikirim sesuai input user, string kosong berarti "kosongkan field ini"
   //
-  // 之所以不特殊照顾凭据字段（比如「凭据留空就跳过」），是因为那会让用户**无法清除**
-  // 一个设错的密钥——界面上没有任何操作能表达「我要把它删掉」。现在的规则下，
-  // 清空输入框就等于清空该字段，语义唯一且用户可控。
-  // 掩码值不会出现在输入框里（见 ConfigField），所以「框里有字」永远等于
-  // 「用户主动填的」。
+  // Alasan kredensial tidak diberi perlakuan khusus (misalnya "kalau kredensial dikosongkan, lewati saja") adalah karena itu akan membuat user **tidak bisa menghapus**
+  // kunci yang salah diisi, karena tidak ada aksi di UI yang bisa menyatakan "saya mau menghapusnya". Dengan aturan sekarang,
+  // mengosongkan input field sama artinya dengan mengosongkan field itu, maknanya tunggal dan user yang mengontrol.
+  // Nilai masked tidak akan muncul di dalam input field (lihat ConfigField), jadi "ada isi di field" selalu berarti
+  // "memang diisi sendiri oleh user".
   function buildConfig(): Record<string, unknown> {
     const defs = CHANNEL_FIELDS[form.kind] ?? [];
     const out: Record<string, unknown> = {};
@@ -165,7 +165,7 @@ export default function NotifyPage() {
 
   async function saveForm() {
     if (!form.name.trim()) {
-      toast.error("请填写渠道名称");
+      toast.error("Isi dulu nama channel");
       return;
     }
     setSaving(true);
@@ -181,16 +181,16 @@ export default function NotifyPage() {
       };
       if (editing) {
         await api.notifyUpdateChannel(editing.id, payload);
-        toast.success("已保存");
+        toast.success("Tersimpan");
         setOpen(false);
       } else {
         await api.notifyCreateChannel(payload);
-        toast.success("已添加渠道");
+        toast.success("Channel ditambahkan");
         setOpen(false);
       }
       load();
     } catch (e) {
-      toast.error("保存失败：" + (e as Error).message);
+      toast.error("Gagal menyimpan: " + (e as Error).message);
     } finally {
       setSaving(false);
     }
@@ -201,10 +201,10 @@ export default function NotifyPage() {
     setTesting(true);
     try {
       const r = await api.notifyTestChannel(editing.id);
-      toast.success(`已发出测试消息（${r.latency_ms} ms），请到群里确认`);
+      toast.success(`Pesan uji terkirim (${r.latency_ms} ms), silakan cek di grup`);
     } catch (e) {
-      // 后端把渠道返回的原始错误如实回传，这是排查配置的唯一线索，原样展示。
-      toast.error("测试失败：" + (e as Error).message, { duration: 12000 });
+      // Backend meneruskan error asli dari channel apa adanya, ini satu-satunya petunjuk untuk melacak masalah konfigurasi, jadi ditampilkan apa adanya.
+      toast.error("Gagal menguji: " + (e as Error).message, { duration: 12000 });
     } finally {
       setTesting(false);
     }
@@ -213,11 +213,11 @@ export default function NotifyPage() {
   async function removeChannel(ch: NotificationChannel) {
     try {
       await api.notifyDeleteChannel(ch.id);
-      toast.success(`已删除：${ch.name}`);
+      toast.success(`Dihapus: ${ch.name}`);
       setOpen(false);
       load();
     } catch (e) {
-      toast.error("删除失败：" + (e as Error).message);
+      toast.error("Gagal menghapus: " + (e as Error).message);
     }
   }
 
@@ -226,7 +226,7 @@ export default function NotifyPage() {
       await api.notifyUpdateChannel(ch.id, { enabled: !ch.enabled });
       load();
     } catch (e) {
-      toast.error("操作失败：" + (e as Error).message);
+      toast.error("Operasi gagal: " + (e as Error).message);
     }
   }
 
@@ -235,9 +235,9 @@ export default function NotifyPage() {
     try {
       await api.setSettings({ notify_enabled: on });
       setMeta((m) => (m ? { ...m, enabled: on } : m));
-      toast.success(on ? "推送已开启" : "推送已暂停");
+      toast.success(on ? "Notifikasi diaktifkan" : "Notifikasi dijeda");
     } catch (e) {
-      toast.error("操作失败：" + (e as Error).message);
+      toast.error("Operasi gagal: " + (e as Error).message);
     } finally {
       setGlobalSaving(false);
     }
@@ -250,10 +250,10 @@ export default function NotifyPage() {
       const n = Number(digestMin);
       if (Number.isFinite(n) && n > 0) patch.notify_digest_interval_min = n;
       await api.setSettings(patch);
-      toast.success("已保存");
+      toast.success("Tersimpan");
       load();
     } catch (e) {
-      toast.error("保存失败：" + (e as Error).message);
+      toast.error("Gagal menyimpan: " + (e as Error).message);
     } finally {
       setGlobalSaving(false);
     }
@@ -267,21 +267,21 @@ export default function NotifyPage() {
     <div className="flex flex-1 flex-col gap-4 md:gap-6">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight">通知推送</h1>
+          <h1 className="text-xl font-semibold tracking-tight">Notifikasi Push</h1>
           <p className="text-muted-foreground text-sm">
-            发现漏洞时推送到钉钉 / 飞书 / 企业微信等渠道 · 每个渠道可独立设推送时机与过滤规则
+            Push ke DingTalk / Feishu / WeChat Work dan channel lainnya saat Kerentanan ditemukan, setiap channel bisa punya waktu pengiriman dan aturan filter sendiri
           </p>
         </div>
         {meta && (
-          // 用 div 而不是 label：Switch 自带 aria-label，外面再套一层 label
-          // 既关联不到任何原生控件，又会让点击文字看起来应该能切换。
+          // Pakai div, bukan label: Switch sudah punya aria-label sendiri, kalau dibungkus label lagi
+          // tidak akan terhubung ke kontrol native apa pun, dan malah membuat teksnya terlihat seperti bisa diklik untuk toggle.
           <div className="flex shrink-0 items-center gap-2 text-sm">
-            <span className="text-muted-foreground">总开关</span>
+            <span className="text-muted-foreground">Saklar Utama</span>
             <Switch
               checked={meta.enabled}
               disabled={globalSaving}
               onCheckedChange={toggleGlobal}
-              aria-label="推送总开关"
+              aria-label="Saklar utama notifikasi"
             />
           </div>
         )}
@@ -289,15 +289,15 @@ export default function NotifyPage() {
 
       {meta && (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-          <StatTile label="渠道" value={`${meta.stats.channels_on} / ${meta.stats.channels}`} hint="启用 / 总数" />
-          <StatTile label="今日送达" value={String(meta.stats.sent_today)} />
-          <StatTile label="待发送" value={String(meta.stats.pending)} />
-          <StatTile label="失败" value={String(meta.stats.failed)} tone={meta.stats.failed > 0 ? "red" : undefined} />
+          <StatTile label="Channel" value={`${meta.stats.channels_on} / ${meta.stats.channels}`} hint="Aktif / Total" />
+          <StatTile label="Terkirim Hari Ini" value={String(meta.stats.sent_today)} />
+          <StatTile label="Menunggu Kirim" value={String(meta.stats.pending)} />
+          <StatTile label="Gagal" value={String(meta.stats.failed)} tone={meta.stats.failed > 0 ? "red" : undefined} />
           <StatTile
-            label="最久积压"
+            label="Backlog Tertua"
             value={formatBacklog(meta.stats.backlog_age_ms)}
-            // 积压年龄比积压条数有用得多：积压 3 条可以是从 3 秒到 3 小时。
-            hint={meta.stats.backlog_age_ms > 5 * 60_000 ? "推送可能卡住了" : undefined}
+            // Usia backlog jauh lebih berguna daripada jumlah backlog: backlog 3 item bisa berarti dari 3 detik sampai 3 jam.
+            hint={meta.stats.backlog_age_ms > 5 * 60_000 ? "Notifikasi mungkin tersendat" : undefined}
             tone={meta.stats.backlog_age_ms > 5 * 60_000 ? "red" : undefined}
           />
         </div>
@@ -305,21 +305,21 @@ export default function NotifyPage() {
 
       <Card className="gap-3">
         <CardHeader>
-          <CardTitle className="text-base">全局设置</CardTitle>
+          <CardTitle className="text-base">Pengaturan Global</CardTitle>
         </CardHeader>
         <CardContent className="grid gap-4 sm:grid-cols-2">
           <div className="grid gap-2">
-            <Label htmlFor="n-base">回链地址</Label>
+            <Label htmlFor="n-base">URL Tautan Balik</Label>
             <Input
               id="n-base"
               placeholder="https://artex.example.com"
               value={baseURL}
               onChange={(e) => setBaseURL(e.target.value)}
             />
-            <p className="text-muted-foreground text-xs">消息里「查看详情」按钮指向的地址。留空则不带按钮。</p>
+            <p className="text-muted-foreground text-xs">Alamat yang dituju oleh tombol "Lihat Detail" di pesan. Kosongkan untuk tidak menampilkan tombol.</p>
           </div>
           <div className="grid gap-2">
-            <Label htmlFor="n-digest">汇总周期（分钟）</Label>
+            <Label htmlFor="n-digest">Periode Ringkasan (menit)</Label>
             <Input
               id="n-digest"
               type="number"
@@ -329,11 +329,11 @@ export default function NotifyPage() {
               value={digestMin}
               onChange={(e) => setDigestMin(e.target.value)}
             />
-            <p className="text-muted-foreground text-xs">仅对「汇总」模式的渠道生效。</p>
+            <p className="text-muted-foreground text-xs">Hanya berlaku untuk channel dengan mode "Ringkasan".</p>
           </div>
           <div className="sm:col-span-2">
             <Button onClick={saveGlobal} disabled={globalSaving}>
-              保存全局设置
+              Simpan Pengaturan Global
             </Button>
           </div>
         </CardContent>
@@ -341,8 +341,8 @@ export default function NotifyPage() {
 
       <Tabs value={tab} onValueChange={(v) => setTab(v as "channels" | "deliveries")} className="flex flex-col gap-4">
         <TabsList>
-          <TabsTrigger value="channels">渠道</TabsTrigger>
-          <TabsTrigger value="deliveries">投递记录</TabsTrigger>
+          <TabsTrigger value="channels">Channel</TabsTrigger>
+          <TabsTrigger value="deliveries">Catatan Pengiriman</TabsTrigger>
         </TabsList>
 
         <TabsContent value="channels">
@@ -353,7 +353,7 @@ export default function NotifyPage() {
               className="text-foreground/70 border-foreground/70 hover:bg-muted/60 hover:shadow-sm flex min-h-[130px] flex-col items-center justify-center gap-2 rounded-xl border border-dashed transition"
             >
               <PlusIcon className="size-6" />
-              <span className="text-sm">添加渠道</span>
+              <span className="text-sm">Tambah Channel</span>
             </button>
 
             {channels.map((ch) => (
@@ -366,25 +366,25 @@ export default function NotifyPage() {
                   <div className="flex items-center gap-2">
                     <BellIcon className="text-muted-foreground size-4 shrink-0" />
                     <CardTitle className="truncate text-base">{ch.name}</CardTitle>
-                    {/* 卡片整体可点（进入编辑），所以这两个控件必须各自吞掉冒泡，
-                        否则开关/删除会顺带触发编辑。把 stopPropagation 挂在控件自己
-                        身上，而不是套一层 div：套 div 会造出一个「看起来可交互但没有
-                        角色」的静态元素，既触发 a11y 告警，语义上也说不通。 */}
+                    {/* Seluruh kartu bisa diklik (masuk ke mode edit), jadi dua kontrol ini masing-masing harus menahan sendiri event bubble-nya,
+                        kalau tidak toggle/hapus akan ikut memicu mode edit. stopPropagation dipasang langsung di kontrolnya
+                        sendiri, bukan dengan membungkus div: membungkus div akan membuat elemen statis yang "terlihat
+                        bisa diinteraksi tapi tanpa role", yang memicu peringatan a11y sekaligus tidak masuk akal secara semantik. */}
                     <div className="ml-auto flex items-center gap-2">
                       <Switch
                         checked={ch.enabled}
                         onCheckedChange={() => toggleEnabled(ch)}
                         onClick={(e) => e.stopPropagation()}
-                        aria-label="启用"
+                        aria-label="Aktifkan"
                       />
                       <Button
                         size="icon"
                         variant="outline"
-                        aria-label="删除"
+                        aria-label="Hapus"
                         onClick={(e) => {
                           e.stopPropagation();
-                          // void 显式丢弃 Promise：removeChannel 自己 catch 并 toast，
-                          // 这里不需要 await（onClick 不是 async）。
+                          // void secara eksplisit membuang Promise: removeChannel sudah catch dan toast sendiri,
+                          // di sini tidak perlu await (onClick bukan async).
                           void removeChannel(ch);
                         }}
                       >
@@ -396,8 +396,8 @@ export default function NotifyPage() {
                 <CardContent className="grid gap-3">
                   <div className="flex flex-wrap items-center gap-2">
                     <Badge variant="outline">{KIND_LABEL[ch.kind] ?? ch.kind}</Badge>
-                    <Badge variant="outline">{ch.mode === "digest" ? "汇总" : "实时"}</Badge>
-                    {!ch.enabled && <Badge variant="outline">已停用</Badge>}
+                    <Badge variant="outline">{ch.mode === "digest" ? "Ringkasan" : "Real-time"}</Badge>
+                    {!ch.enabled && <Badge variant="outline">Nonaktif</Badge>}
                   </div>
                   <FilterSummary filter={ch.filter} />
                 </CardContent>
@@ -414,21 +414,21 @@ export default function NotifyPage() {
       <Sheet open={open} onOpenChange={setOpen}>
         <SheetContent side="right" className="w-full data-[side=right]:sm:max-w-lg">
           <SheetHeader>
-            <SheetTitle>{editing ? editing.name : "添加通知渠道"}</SheetTitle>
+            <SheetTitle>{editing ? editing.name : "Tambah Channel Notifikasi"}</SheetTitle>
             <SheetDescription>
               {KIND_LABEL[form.kind] ?? form.kind}
-              {defaultRate > 0 ? ` · 默认限流 ${defaultRate} 条/分钟` : " · 不限流"}
+              {defaultRate > 0 ? ` · Limit default ${defaultRate} pesan/menit` : " · Tanpa limit"}
             </SheetDescription>
           </SheetHeader>
 
           <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4">
             <div className="grid gap-4 py-4">
               <div className="grid gap-2">
-                <Label>渠道类型</Label>
+                <Label>Tipe Channel</Label>
                 <Select
                   value={form.kind}
                   onValueChange={(v) => {
-                    // 换类型等于换一套凭据字段，不能把旧配置合并进来。
+                    // Ganti tipe berarti ganti satu set field kredensial, konfigurasi lama tidak boleh ikut digabungkan.
                     setF({ kind: v, config: {} });
                   }}
                   disabled={!!editing}
@@ -446,16 +446,16 @@ export default function NotifyPage() {
                 </Select>
                 {editing && (
                   <p className="text-muted-foreground text-xs">
-                    渠道类型不可修改——改了类型等于换一套凭据，请新建渠道。
+                    Tipe channel tidak bisa diubah, mengubah tipe berarti mengganti satu set kredensial, silakan buat channel baru.
                   </p>
                 )}
               </div>
 
               <div className="grid gap-2">
-                <Label htmlFor="n-name">渠道名称</Label>
+                <Label htmlFor="n-name">Nama Channel</Label>
                 <Input
                   id="n-name"
-                  placeholder="应急响应群 / 日常播报群"
+                  placeholder="Grup Tanggap Darurat / Grup Info Harian"
                   value={form.name}
                   onChange={(e) => setF({ name: e.target.value })}
                 />
@@ -463,7 +463,7 @@ export default function NotifyPage() {
 
               {fields.length === 0 ? (
                 <p className="text-muted-foreground text-sm">
-                  该渠道的表单尚未定义（前端缺 CHANNEL_FIELDS 条目），请补全后再试。
+                  Form untuk channel ini belum didefinisikan (entri CHANNEL_FIELDS belum ada di frontend), lengkapi dulu lalu coba lagi.
                 </p>
               ) : (
                 fields.map((d) => (
@@ -478,41 +478,41 @@ export default function NotifyPage() {
               )}
 
               <div className="grid gap-2">
-                <Label>推送时机</Label>
+                <Label>Waktu Pengiriman</Label>
                 <Select value={form.mode} onValueChange={(v) => setF({ mode: v as "realtime" | "digest" })}>
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="realtime">实时 · 每条漏洞单独发一条</SelectItem>
-                    <SelectItem value="digest">汇总 · 按周期合并成一条</SelectItem>
+                    <SelectItem value="realtime">Real-time . Setiap Kerentanan dikirim satu per satu</SelectItem>
+                    <SelectItem value="digest">Ringkasan . Digabung jadi satu pesan per periode</SelectItem>
                   </SelectContent>
                 </Select>
                 <p className="text-muted-foreground text-xs">
-                  想做「高危实时、其余汇总」就建两个渠道：一个实时 + 门槛高危，一个汇总 + 不限级别。
+                  Kalau mau "Tinggi real-time, sisanya ringkasan", buat dua channel: satu real-time dengan batas minimal Tinggi, satu ringkasan tanpa batas level.
                 </p>
               </div>
 
               <div className="grid gap-2">
-                <Label htmlFor="n-rate">限流（条/分钟）</Label>
+                <Label htmlFor="n-rate">Limit (pesan/menit)</Label>
                 <Input
                   id="n-rate"
                   type="number"
                   min={0}
-                  placeholder={defaultRate > 0 ? String(defaultRate) : "0 = 不限"}
+                  placeholder={defaultRate > 0 ? String(defaultRate) : "0 = tanpa limit"}
                   value={form.ratePerMin}
                   onChange={(e) => setF({ ratePerMin: e.target.value })}
                 />
                 <p className="text-muted-foreground text-xs">
-                  留空用渠道默认值；0 表示不限流。超限不会丢消息，只会推迟发送。
+                  Kosongkan untuk memakai nilai default channel; 0 berarti tanpa limit. Melebihi limit tidak akan membuang pesan, hanya menunda pengirimannya.
                 </p>
               </div>
 
               <div className="border-t pt-4">
-                <p className="mb-3 text-sm font-medium">过滤规则（留空即不过滤）</p>
+                <p className="mb-3 text-sm font-medium">Aturan Filter (kosongkan untuk tidak memfilter)</p>
                 <div className="grid gap-4">
                   <div className="grid gap-2">
-                    <Label>最低级别</Label>
+                    <Label>Level Minimum</Label>
                     <Select
                       value={form.minSeverity || "all"}
                       onValueChange={(v) => setF({ minSeverity: v === "all" ? "" : v })}
@@ -530,29 +530,29 @@ export default function NotifyPage() {
                     </Select>
                   </div>
                   <div className="grid gap-2">
-                    <Label htmlFor="n-inc">只推这些漏洞类型</Label>
+                    <Label htmlFor="n-inc">Hanya push jenis Kerentanan ini</Label>
                     <Textarea
                       id="n-inc"
-                      placeholder={"SQL注入\n命令执行"}
+                      placeholder={"SQL Injection\nCommand Execution"}
                       value={form.includeText}
                       onChange={(e) => setF({ includeText: e.target.value })}
                     />
                     <p className="text-muted-foreground text-xs">
-                      每行一个关键词，大小写不敏感的子串匹配。留空=全部类型。
+                      Satu keyword per baris, pencocokan substring tidak case-sensitive. Kosongkan = semua jenis.
                     </p>
                   </div>
                   <div className="grid gap-2">
-                    <Label htmlFor="n-exc">排除这些漏洞类型</Label>
+                    <Label htmlFor="n-exc">Kecualikan jenis Kerentanan ini</Label>
                     <Textarea
                       id="n-exc"
-                      placeholder={"信息泄露"}
+                      placeholder={"Information Disclosure"}
                       value={form.excludeText}
                       onChange={(e) => setF({ excludeText: e.target.value })}
                     />
-                    <p className="text-muted-foreground text-xs">排除优先于包含：同时命中时会被排除。</p>
+                    <p className="text-muted-foreground text-xs">Pengecualian lebih diprioritaskan daripada penyertaan: kalau keduanya cocok, akan dikecualikan.</p>
                   </div>
                   <div className="grid gap-2">
-                    <Label htmlFor="n-tasks">限定任务 ID</Label>
+                    <Label htmlFor="n-tasks">Batasi ID Tugas</Label>
                     <Input
                       id="n-tasks"
                       placeholder="1, 2, 3"
@@ -561,39 +561,39 @@ export default function NotifyPage() {
                     />
                   </div>
                   <div className="grid gap-2">
-                    <Label htmlFor="n-assets">限定资产 ID</Label>
+                    <Label htmlFor="n-assets">Batasi ID Aset</Label>
                     <Input
                       id="n-assets"
                       placeholder="10, 11"
                       value={form.assetIDsText}
                       onChange={(e) => setF({ assetIDsText: e.target.value })}
                     />
-                    <p className="text-muted-foreground text-xs">任务/资产留空=不限；填写后要求与漏洞有交集。</p>
+                    <p className="text-muted-foreground text-xs">Tugas/Aset dikosongkan = tanpa batasan; kalau diisi, Kerentanan harus beririsan dengan daftar ini.</p>
                   </div>
                   <div className="flex items-center gap-2 text-sm">
                     <Switch
                       checked={form.onStatusChange}
                       onCheckedChange={(v) => setF({ onStatusChange: v })}
-                      aria-label="接收状态变更"
+                      aria-label="Terima perubahan status"
                     />
-                    漏洞处置状态变更时也推送（仅实时模式）
+                    Push juga saat status penanganan Kerentanan berubah (hanya mode real-time)
                   </div>
                 </div>
               </div>
 
               <div className="flex items-center gap-2 text-sm">
-                <Switch checked={form.enabled} onCheckedChange={(v) => setF({ enabled: v })} aria-label="启用" />
-                启用该渠道
+                <Switch checked={form.enabled} onCheckedChange={(v) => setF({ enabled: v })} aria-label="Aktifkan" />
+                Aktifkan channel ini
               </div>
             </div>
 
             <div className="flex gap-2 pt-2 pb-6">
               <Button onClick={saveForm} disabled={saving}>
-                {editing ? "保存" : "添加"}
+                {editing ? "Simpan" : "Tambah"}
               </Button>
               {editing && (
                 <Button variant="outline" onClick={testChannel} disabled={testing}>
-                  <SendIcon /> 发送测试消息
+                  <SendIcon /> Kirim Pesan Uji
                 </Button>
               )}
             </div>

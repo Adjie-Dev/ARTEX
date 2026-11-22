@@ -16,21 +16,21 @@ import (
 	"time"
 )
 
-// allowLocalTargets 决定是否允许把消息投递到环回 / 链路本地地址。
+// allowLocalTargets menentukan apakah pesan boleh dikirim ke alamat loopback / link-local.
 //
-// 默认拒绝。这几段地址不是 IM 机器人或公网邮件服务器会出现的地方，而它们能
-// 打到的东西很敏感：同机另一个服务的管理端口、以及云环境的元数据端点
-// （169.254.169.254，可读出实例凭据）。投递地址是管理员配的，但一个被 XSS/CSRF
-// 借用的管理会话、或共用同一 JWT 的第二个人，都能靠改配置把响应内容读回来
-// ——doJSON 会把 4xx/5xx 的响应体前 200 字节写进 last_error，而投递历史接口
-// 会把它回显出来，这就是一条半盲读原语。
+// Default menolak. Rentang alamat ini bukan tempat bot IM atau server email publik biasanya berada, dan yang
+// bisa dijangkau lewat sana cukup sensitif: port admin layanan lain di mesin yang sama, serta endpoint metadata
+// cloud (169.254.169.254, yang bisa membocorkan kredensial instance). Alamat pengiriman memang dikonfigurasi admin, tapi
+// sesi admin yang dibajak lewat XSS/CSRF, atau orang lain yang berbagi JWT yang sama, bisa membaca kembali isi respons
+// hanya dengan mengubah konfigurasi, karena doJSON menulis 200 byte pertama dari body respons 4xx/5xx ke last_error,
+// dan endpoint riwayat pengiriman menampilkannya kembali. Ini jadi primitif pembacaan semi-blind.
 //
-// 但「本机 SMTP 中继」（127.0.0.1:25 上的 postfix）是自建邮件的常见配置，
-// 一刀切会把人卡住。所以留一个显式逃生口而不是硬编码放行：
-// 设置 ARTEX_NOTIFY_ALLOW_LOCAL=1 即允许。
+// Tapi "SMTP relay lokal" (postfix di 127.0.0.1:25) adalah konfigurasi umum untuk mail server sendiri, dan
+// pelarangan total akan membuat orang terjebak. Karena itu disediakan jalan keluar yang eksplisit, bukan izin yang
+// di-hardcode: set ARTEX_NOTIFY_ALLOW_LOCAL=1 untuk mengizinkannya.
 //
-// 导出为 AllowLocalTargetsEnv 是为了让测试能明确地打开它——本包与 server 包的
-// 用例大量使用 127.0.0.1 上的 httptest 假接收端，不打开就全部被守卫拦下。
+// Diekspor sebagai AllowLocalTargetsEnv agar pengujian bisa mengaktifkannya secara eksplisit, karena test case di
+// paket ini dan paket server banyak memakai penerima tiruan httptest di 127.0.0.1, yang tanpa ini akan diblokir semua oleh guard.
 const AllowLocalTargetsEnv = "ARTEX_NOTIFY_ALLOW_LOCAL"
 
 func allowLocalTargets() bool {
@@ -38,17 +38,18 @@ func allowLocalTargets() bool {
 	return v == "1" || strings.EqualFold(v, "true")
 }
 
-// isBlockedDialIP 报告目标 IP 是否属于「默认不允许投递」的地址段。
+// isBlockedDialIP melaporkan apakah IP tujuan termasuk rentang alamat yang "secara default tidak diizinkan untuk pengiriman".
 //
-// 只拒绝环回、链路本地（含云元数据 169.254.169.254）、未指定与组播。
-// **不拒绝** RFC1918 私网：内网自建 Mattermost / SMTP 中继是很常见的合法用法，
-// 把它们一并挡掉会让功能在真实环境里直接不可用。这条取舍是刻意的——
-// 防护要挡住真正敏感的目标，同时不能把正常部署一起废掉。
+// Hanya menolak loopback, link-local (termasuk metadata cloud 169.254.169.254), unspecified, dan multicast.
+// **Tidak menolak** jaringan privat RFC1918: Mattermost / SMTP relay internal yang dibangun sendiri adalah penggunaan
+// sah yang umum, dan memblokirnya sekalian akan membuat fitur ini langsung tidak bisa dipakai di lingkungan nyata.
+// Keputusan ini sengaja diambil: perlindungan harus menghalangi target yang benar-benar sensitif, tanpa merusak
+// deployment yang normal.
 func isBlockedDialIP(ip net.IP) bool {
 	if ip == nil {
 		return true
 	}
-	// IPv4-mapped IPv6（::ffff:127.0.0.1）要还原成 IPv4 再判，否则绕过检查。
+	// IPv4-mapped IPv6 (::ffff:127.0.0.1) harus dikembalikan ke bentuk IPv4 sebelum diperiksa, jika tidak pemeriksaan ini bisa dilewati.
 	if v4 := ip.To4(); v4 != nil {
 		ip = v4
 	}
@@ -56,13 +57,13 @@ func isBlockedDialIP(ip net.IP) bool {
 		ip.IsInterfaceLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast()
 }
 
-// blockInternalDial 是 http.Transport 拨号器的 Control 钩子，在**连接建立时**
-// 检查目标地址。
+// blockInternalDial adalah hook Control pada dialer http.Transport, yang memeriksa alamat tujuan
+// **pada saat koneksi dibuat**.
 //
-// 为什么设在拨号阶段而不是只在保存配置时校验：这里才是最终生效点。
-// 它同时覆盖两种绕过配置校验的情形——DNS 重绑定（校验时解析到公网 IP、
-// 真正连接时解析到内网）与重定向（虽然我们已拒绝跨主机跳转，但同主机跳转
-// 仍可能把路径指到别处）。
+// Mengapa diletakkan di tahap dial, bukan hanya divalidasi saat konfigurasi disimpan: tahap inilah titik yang
+// benar-benar menentukan. Hook ini juga menutup dua cara untuk melewati validasi konfigurasi, yaitu DNS rebinding
+// (saat validasi resolve ke IP publik, saat koneksi sungguhan resolve ke jaringan internal) dan redirect (meskipun
+// kita sudah menolak lompatan antar-host, lompatan di host yang sama masih bisa mengarahkan path ke tempat lain).
 func blockInternalDial(_, address string, _ syscall.RawConn) error {
 	if allowLocalTargets() {
 		return nil
@@ -73,17 +74,17 @@ func blockInternalDial(_, address string, _ syscall.RawConn) error {
 	}
 	ip := net.ParseIP(host)
 	if ip == nil {
-		return fmt.Errorf("无法解析目标地址 %q", host)
+		return fmt.Errorf("tidak bisa mengurai alamat tujuan %q", host)
 	}
 	if isBlockedDialIP(ip) {
-		return fmt.Errorf("拒绝投递到本机/链路本地地址 %s（如确需投递到本机服务，设置 %s=1）", ip, AllowLocalTargetsEnv)
+		return fmt.Errorf("pengiriman ke alamat lokal/link-local %s ditolak (jika memang perlu mengirim ke layanan lokal, set %s=1)", ip, AllowLocalTargetsEnv)
 	}
 	return nil
 }
 
-// notifyTransport 在默认 Transport 的基础上只加一个拨号守卫。
-// 用 Clone 保留默认的全部调优（连接池、HTTP/2、超时、proxy 等），
-// 避免为了加一个检查而改动其它行为。
+// notifyTransport hanya menambahkan satu guard dial di atas Transport default.
+// Memakai Clone agar seluruh tuning default tetap terjaga (connection pool, HTTP/2, timeout, proxy, dll),
+// sehingga menambah satu pemeriksaan tidak mengubah perilaku lain.
 var notifyTransport = func() *http.Transport {
 	t, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
@@ -94,56 +95,59 @@ var notifyTransport = func() *http.Transport {
 	return clone
 }()
 
-// httpClient 是所有渠道投递共用的客户端。
+// httpClient adalah klien yang dipakai bersama oleh semua pengiriman channel.
 //
-// 刻意**不**复用项目的全局出口代理（server 侧的 GlobalProxy）：那个代理是给渗透
-// 目标流量用的，常是不稳定的隧道，而通知的可用性不该被目标网络的抖动绑架。
-// IM 推送直连即可。超时设为 15 秒——比这更慢的对端实际上已经是故障状态。
+// Sengaja **tidak** memakai ulang proxy keluar global milik proyek (GlobalProxy di sisi server): proxy itu dipakai
+// untuk trafik target pentest, biasanya berupa tunnel yang tidak stabil, sementara ketersediaan notifikasi tidak
+// seharusnya tersandera oleh gangguan jaringan target. Pengiriman IM cukup koneksi langsung. Timeout diset 15 detik,
+// karena jika lawan bicara lebih lambat dari itu, sebenarnya sudah dianggap bermasalah.
 //
-// 拒绝跨主机重定向：本功能的投递地址都是「一个固定 endpoint」形态，正常不会
-// 重定向到别的主机；而这几家的凭据（钉钉的 access_token、企微的 key、Telegram 的
-// bot token）**就在 URL 里**，跟随跨主机跳转等于把凭据交给重定向目标。同主机
-// 的跳转（如末尾补斜杠）仍允许。
+// Menolak redirect antar-host: alamat pengiriman pada fitur ini selalu berbentuk "satu endpoint tetap", sehingga
+// normalnya tidak akan diarahkan ke host lain; sementara kredensial pada beberapa platform (access_token DingTalk,
+// key WeCom, bot token Telegram) **ada di dalam URL itu sendiri**, sehingga mengikuti redirect antar-host sama
+// dengan menyerahkan kredensial ke tujuan redirect. Redirect di host yang sama (misalnya penambahan garis miring
+// di akhir) tetap diizinkan.
 var httpClient = &http.Client{
 	Timeout:   15 * time.Second,
 	Transport: notifyTransport,
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 5 {
-			return errors.New("重定向次数过多")
+			return errors.New("terlalu banyak redirect")
 		}
 		if len(via) > 0 && req.URL.Host != via[0].URL.Host {
-			return fmt.Errorf("拒绝跨主机重定向（%s → %s）", via[0].URL.Host, req.URL.Host)
+			return fmt.Errorf("redirect antar-host ditolak (%s -> %s)", via[0].URL.Host, req.URL.Host)
 		}
 		return nil
 	},
 }
 
-// respBodyLimit 限制读取响应体的大小。对端异常时可能吐回超大内容，而我们只需要
-// 错误码和一小段错误描述用于展示在投递历史里。
+// respBodyLimit membatasi ukuran body respons yang dibaca. Saat lawan bicara bermasalah, bisa saja mengembalikan
+// konten yang sangat besar, padahal kita hanya butuh kode error dan sedikit deskripsi untuk ditampilkan di riwayat pengiriman.
 const respBodyLimit = 8 << 10
 
-// doJSON 发送一次请求并返回响应体（已限长）。
+// doJSON mengirim satu permintaan dan mengembalikan body respons (yang sudah dibatasi panjangnya).
 //
-// payload 为 nil 时发送空 body（用于 GET 或平台不要求 body 的场景）。
-// headers 里的键值原样附加，用于通用 Webhook 的自定义头。
+// Saat payload nil, body yang dikirim kosong (untuk GET atau platform yang tidak membutuhkan body).
+// Key-value di headers ditambahkan apa adanya, dipakai untuk header kustom pada webhook generik.
 //
-// 错误分类是这个函数的核心职责：网络层失败与 5xx/408/429 归为「可重试」，
-// 其余 4xx 归为「永久失败」——重试一个 403 只是把同一个错误刷 3 遍日志。
+// Klasifikasi error adalah tanggung jawab utama fungsi ini: kegagalan di level jaringan serta 5xx/408/429
+// dikategorikan "bisa dicoba ulang", sisanya 4xx dikategorikan "gagal permanen", karena mencoba ulang error 403
+// hanya akan menulis error yang sama ke log tiga kali.
 func doJSON(ctx context.Context, method, url string, headers map[string]string, payload any) ([]byte, error) {
 	var body io.Reader
 	if payload != nil {
 		raw, err := json.Marshal(payload)
 		if err != nil {
-			// 序列化失败是本地 bug（配置字段类型不对），重试也不会变好。
-			return nil, Permanent(fmt.Errorf("构造请求体失败: %w", err))
+			// Kegagalan serialisasi adalah bug lokal (tipe field konfigurasi salah), dicoba ulang pun tidak akan membantu.
+			return nil, Permanent(fmt.Errorf("gagal membuat body permintaan: %w", err))
 		}
 		body = bytes.NewReader(raw)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
-		// URL 非法——多半是用户把地址填错了，属于永久失败。
-		// 这里同样不能透传 err：url.Parse 的错误文本里含完整地址。
-		return nil, Permanent(fmt.Errorf("请求地址非法: %s", redactRequestTarget(url)))
+		// URL tidak valid, kemungkinan besar pengguna salah mengisi alamat, ini termasuk gagal permanen.
+		// Di sini juga tidak boleh meneruskan err apa adanya: teks error dari url.Parse memuat alamat lengkap.
+		return nil, Permanent(fmt.Errorf("alamat permintaan tidak valid: %s", redactRequestTarget(url)))
 	}
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json; charset=utf-8")
@@ -153,68 +157,70 @@ func doJSON(ctx context.Context, method, url string, headers map[string]string, 
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		// 连接被拒、DNS 失败、超时——多为瞬时故障，交给退避重试。
+		// Koneksi ditolak, DNS gagal, timeout, kebanyakan adalah gangguan sementara, jadi diserahkan ke mekanisme retry dengan backoff.
 		//
-		// 错误文本必须脱敏后再往外传。原因：http.Client.Do 返回的是 *url.Error，
-		// 它的 Error() 是 `Op "完整URL": 底层错误`，而本功能这几家的凭据**就在 URL 里**
-		// （钉钉 access_token、企微 key、飞书 hook id、Telegram /bot<token>/）。
-		// 不脱敏的话，凭据会顺着这条错误串流到四个地方：notification_deliveries
-		// 的 last_error（明文落库）、投递历史接口的响应（**绕过渠道配置的掩码**）、
-		// 服务端日志、以及测试发送接口回给前端的 502 文本。
-		return nil, fmt.Errorf("请求失败: %s", redactTransportError(err))
+		// Teks error harus disamarkan dulu sebelum diteruskan keluar. Alasannya: http.Client.Do mengembalikan *url.Error,
+		// dan Error()-nya berbentuk `Op "URL lengkap": error dasar`, sementara kredensial pada beberapa platform ini
+		// **ada di dalam URL itu sendiri** (access_token DingTalk, key WeCom, hook id Feishu, /bot<token>/ Telegram).
+		// Jika tidak disamarkan, kredensial akan ikut mengalir lewat string error ini ke empat tempat: kolom last_error
+		// di notification_deliveries (tersimpan sebagai teks biasa), respons endpoint riwayat pengiriman (**melewati
+		// masking pada konfigurasi channel**), log server, serta teks 502 yang dikembalikan endpoint kirim-uji ke frontend.
+		return nil, fmt.Errorf("permintaan gagal: %s", redactTransportError(err))
 	}
 	defer resp.Body.Close()
 	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, respBodyLimit))
 	if readErr != nil {
-		return nil, fmt.Errorf("读取响应失败: %w", readErr)
+		return nil, fmt.Errorf("gagal membaca respons: %w", readErr)
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return raw, nil
 	}
-	// 429（限流）与 408（超时）值得重试；其余 4xx 是配置或权限问题，重试无意义。
+	// 429 (rate limit) dan 408 (timeout) layak dicoba ulang; sisanya 4xx adalah masalah konfigurasi atau izin, dicoba ulang tidak ada gunanya.
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusRequestTimeout {
-		return nil, fmt.Errorf("对方限流或超时 (HTTP %d): %s", resp.StatusCode, snippet(raw))
+		return nil, fmt.Errorf("pihak lain membatasi laju atau timeout (HTTP %d): %s", resp.StatusCode, snippet(raw))
 	}
 	if resp.StatusCode >= 500 {
-		return nil, fmt.Errorf("对方服务异常 (HTTP %d): %s", resp.StatusCode, snippet(raw))
+		return nil, fmt.Errorf("layanan pihak lain bermasalah (HTTP %d): %s", resp.StatusCode, snippet(raw))
 	}
-	return nil, Permanent(fmt.Errorf("对方拒绝请求 (HTTP %d): %s", resp.StatusCode, snippet(raw)))
+	return nil, Permanent(fmt.Errorf("permintaan ditolak pihak lain (HTTP %d): %s", resp.StatusCode, snippet(raw)))
 }
 
-// snippet 把响应体压成一行短文本，用于错误信息。响应里可能带换行与大量空白，
-// 直接塞进 last_error 会让投递历史页面排版崩掉。
+// snippet memadatkan body respons menjadi satu baris teks singkat untuk pesan error. Respons bisa memuat baris baru
+// dan banyak whitespace, dan jika langsung dimasukkan ke last_error akan merusak tampilan halaman riwayat pengiriman.
 func snippet(raw []byte) string {
 	return OneLine(string(raw), 200)
 }
 
-// redactRequestTarget 把投递地址压成「scheme://host/…」，用于错误信息。
+// redactRequestTarget memadatkan alamat pengiriman menjadi bentuk "scheme://host/…" untuk pesan error.
 //
-// 这是本包唯一的地址脱敏口径，刻意做得**足够粗暴**：除了 scheme 与 host，
-// 其余一律丢弃。原因是没有一个「通用且安全」的方式判断 URL 的哪一段是凭据：
+// Ini adalah satu-satunya mekanisme penyamaran alamat di paket ini, dan sengaja dibuat **cukup kasar**: selain
+// scheme dan host, semuanya dibuang. Alasannya, tidak ada cara "umum dan aman" untuk menentukan bagian mana dari
+// URL yang merupakan kredensial:
 //
-//	钉钉   凭据在 query      /robot/send?access_token=xxx
-//	企微   凭据在 query      /cgi-bin/webhook/send?key=xxx
-//	飞书   凭据在**路径末段** /open-apis/bot/v2/hook/<hook_id>
-//	Telegram 凭据在**路径中段** /bot<token>/sendMessage
+//	DingTalk  kredensial di query      /robot/send?access_token=xxx
+//	WeCom     kredensial di query      /cgi-bin/webhook/send?key=xxx
+//	Feishu    kredensial di **akhir path**  /open-apis/bot/v2/hook/<hook_id>
+//	Telegram  kredensial di **tengah path**  /bot<token>/sendMessage
 //
-// 想「只保留有用部分」就得按渠道打补丁，而漏掉任何一家就是一次凭据泄露。
-// 保留 host 已经够用于排查（DNS 解析不了、连不上、证书不对都能定位），
-// 具体是哪个机器人由渠道配置里的掩码尾号提示去认。
+// Kalau ingin "hanya menyisakan bagian yang berguna", harus dibuat patch per channel, dan melewatkan satu platform
+// saja berarti satu kebocoran kredensial. Menyisakan host saja sudah cukup untuk investigasi (DNS tidak bisa
+// di-resolve, tidak bisa connect, sertifikat salah semuanya bisa dilacak), sementara bot mana yang dimaksud bisa
+// dikenali dari petunjuk digit akhir yang disamarkan pada konfigurasi channel.
 //
-// 解析失败时返回固定占位符——绝不把原始串回显出去。
+// Saat gagal diparse, mengembalikan placeholder tetap, tidak pernah menampilkan kembali string aslinya.
 func redactRequestTarget(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
-		return "(地址不可解析)"
+		return "(alamat tidak dapat diurai)"
 	}
 	return u.Scheme + "://" + u.Host + "/…"
 }
 
-// redactTransportError 从传输层错误里剥掉地址，只保留底层原因。
+// redactTransportError melepas alamat dari error pada level transport, hanya menyisakan alasan dasarnya.
 //
-// *url.Error 的结构是 {Op, URL, Err}，Error() 会把 URL 一起打出来。
-// 这里显式取 Err 字段，绕开它的 Error() ——比事后做字符串替换更可靠，
-// 因为替换要正确应对 URL 编码/转义后的各种变体，容易漏。
+// Struktur *url.Error adalah {Op, URL, Err}, dan Error()-nya menampilkan URL sekalian. Di sini field Err diambil
+// secara eksplisit, melewati Error()-nya, karena ini lebih dapat diandalkan dibanding melakukan penggantian string
+// setelahnya, sebab penggantian harus menangani berbagai variasi hasil encoding/escaping URL dengan benar, dan mudah terlewat.
 func redactTransportError(err error) string {
 	var uerr *url.Error
 	if errors.As(err, &uerr) {
@@ -225,16 +231,17 @@ func redactTransportError(err error) string {
 		if uerr.Err != nil {
 			return fmt.Sprintf("%s %s: %s", uerr.Op, host, uerr.Err)
 		}
-		return fmt.Sprintf("%s %s: 未知错误", uerr.Op, host)
+		return fmt.Sprintf("%s %s: error tidak dikenal", uerr.Op, host)
 	}
-	// 非 *url.Error（如重定向策略返回的错误）也可能带地址，统一走脱敏。
+	// Error yang bukan *url.Error (misalnya error dari kebijakan redirect) juga bisa membawa alamat, disamarkan dengan cara yang sama.
 	return redactURLsInText(err.Error())
 }
 
-// redactURLsInText 把一段文本里出现的 http(s) 地址替换成脱敏形态。
+// redactURLsInText mengganti alamat http(s) yang muncul dalam sebuah teks dengan bentuk yang sudah disamarkan.
 //
-// 用于兜底那些拿不到结构化字段的错误（重定向策略错误、第三方库的自定义错误）。
-// 只识别 http/https 前缀，按空白与引号切分——地址不会包含这两类字符。
+// Dipakai sebagai jaring pengaman untuk error yang tidak punya field terstruktur (error kebijakan redirect, error
+// kustom dari library pihak ketiga). Hanya mengenali prefiks http/https, dipotong berdasarkan whitespace dan tanda
+// kutip, karena alamat tidak akan mengandung dua jenis karakter tersebut.
 func redactURLsInText(s string) string {
 	var b strings.Builder
 	for i := 0; i < len(s); {

@@ -9,24 +9,32 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Finding asset tree — the「按资产」view of the global findings list.
+// Finding asset tree: tampilan "berdasarkan aset" dari daftar temuan global.
 //
-// 层级与 BuildCoverageGraph 同源(company → root_domain/ip/app → subdomain →
-// service → endpoint),但那份是「某个任务的范围内资产」的力导向图,这份是
-// 「全库有发现的资产」的树:只收有发现的资产及其祖先链,节点带子树聚合计数。
-// 两者的父子优先级规则必须保持一致,改一处请对照 task_scope.go 改另一处。
+// Hierarkinya sama akarnya dengan BuildCoverageGraph (company -> root_domain/ip/app
+// -> subdomain -> service -> endpoint), tetapi yang itu adalah force-directed
+// graph untuk "aset dalam lingkup satu task", sedangkan ini adalah pohon
+// untuk "aset yang punya temuan di seluruh database": hanya memuat aset yang
+// punya temuan beserta rantai leluhurnya, dan setiap node membawa hitungan
+// agregat subtree-nya. Aturan prioritas parent-child keduanya harus tetap
+// konsisten, kalau salah satu diubah cocokkan juga dengan task_scope.go.
 // ---------------------------------------------------------------------------
 
-// FindingUnassignedAsset 是「未关联资产」的节点 key,也是列表接口的筛选哨兵:
-// 命中 asset_ids 为空、或所指资产已被删除的发现。
+// FindingUnassignedAsset adalah key node untuk "aset tidak terkait", dan juga
+// sentinel filter pada endpoint daftar: menjaring temuan dengan asset_ids
+// kosong, atau yang asetnya sudah dihapus.
 const FindingUnassignedAsset = "__none__"
 
-// findingAssetTreeMaxNodes 是返回给前端的节点上限。超出时自底向上丢弃整层
-// (endpoint 优先,其次 service):它们的计数已经累加进父节点,丢节点不丢数字。
+// findingAssetTreeMaxNodes adalah batas atas jumlah node yang dikembalikan
+// ke frontend. Saat terlampaui, seluruh level dibuang dari bawah ke atas
+// (endpoint lebih dulu, lalu service): hitungannya sudah diakumulasi ke node
+// induk, jadi yang hilang hanya node-nya, bukan angkanya.
 const findingAssetTreeMaxNodes = 3000
 
-// FindingAssetNode 是资产树的一个节点。Key 与覆盖图同构:资产行是 "a:<id>"、
-// 企业是 "c:<id>"、没有资产行的根域名是合成的 "r:<domain>"、未关联桶是 "__none__"。
+// FindingAssetNode adalah satu node pada pohon aset. Key-nya sama bentuknya
+// dengan graph coverage: baris aset berupa "a:<id>", perusahaan berupa
+// "c:<id>", root domain tanpa baris aset dibuat sintetis sebagai "r:<domain>",
+// dan bucket tidak terkait adalah "__none__".
 type FindingAssetNode struct {
 	Key       string `json:"key"`
 	Parent    string `json:"parent,omitempty"`
@@ -34,8 +42,8 @@ type FindingAssetNode struct {
 	Label     string `json:"label"`
 	AssetID   int64  `json:"asset_id,omitempty"`
 	CompanyID int64  `json:"company_id,omitempty"`
-	// Self 是直接挂在该资产上的发现数;Total 含全部子孙且按 finding 去重
-	// (一个发现挂多个资产时,只在共同祖先上计一次)。
+	// Self adalah jumlah temuan yang langsung tertaut ke aset ini; Total mencakup semua keturunannya dan sudah dedup per finding
+	// (kalau satu temuan tertaut ke beberapa aset, hanya dihitung sekali di leluhur bersamanya).
 	Self        int       `json:"self"`
 	Total       int       `json:"total"`
 	Critical    int       `json:"critical"`
@@ -45,17 +53,17 @@ type FindingAssetNode struct {
 	LastFoundAt time.Time `json:"last_found_at"`
 }
 
-// FindingAssetTree 是整棵树的一次性快照。Nodes 已排好序:同一父节点下按发现数
-// 降序、标签升序,「未关联资产」恒在最后。
+// FindingAssetTree adalah snapshot sekali ambil dari seluruh pohon. Nodes sudah diurutkan: dalam satu parent yang sama berdasarkan jumlah temuan
+// menurun, lalu label menaik, "aset tidak terkait" selalu di paling akhir.
 type FindingAssetTree struct {
 	Nodes        []FindingAssetNode `json:"nodes"`
 	FindingTotal int                `json:"finding_total"`
-	// Truncated=true 表示为控制体积丢弃了 DroppedKinds 里的层级。
+	// Truncated=true berarti level pada DroppedKinds dibuang untuk mengontrol ukuran.
 	Truncated    bool     `json:"truncated"`
 	DroppedKinds []string `json:"dropped_kinds,omitempty"`
 }
 
-// assetRow 是构树需要的资产字段子集。
+// assetRow adalah subset field aset yang diperlukan untuk membangun pohon.
 type assetRow struct {
 	id          int64
 	kind        string
@@ -76,9 +84,9 @@ func (a *assetRow) coverageNode() CoverageGraphNode {
 	}
 }
 
-// label 复用覆盖图的标签规则(URL > domain > ip > app_name > root_domain),但没有
-// URL 的服务(SMB、非 HTTP 端口等)要补上端口:否则它的标签会和宿主 IP/域名那行
-// 一模一样,树上父子两行看起来完全重复。
+// label memakai ulang aturan label dari graph coverage (URL > domain > ip > app_name > root_domain), tetapi service tanpa
+// URL (SMB, port non-HTTP, dll.) perlu ditambahkan port: kalau tidak, labelnya akan sama persis dengan baris IP/domain induknya,
+// membuat baris parent dan child di pohon terlihat duplikat total.
 func (a *assetRow) label() string {
 	if a.kind == "service" && a.url == "" {
 		if host, port := a.hostPort(); host != "" && port > 0 {
@@ -90,7 +98,7 @@ func (a *assetRow) label() string {
 	return coverageNodeLabel(&n)
 }
 
-// hostPort 与覆盖图一致:优先 domain,其次 URL 里的 host,最后 ip。
+// hostPort konsisten dengan graph coverage: mengutamakan domain, lalu host dari URL, terakhir ip.
 func (a *assetRow) hostPort() (string, int) {
 	n := a.coverageNode()
 	return hostPortOf(&n)
@@ -120,21 +128,21 @@ func scanAssetRows(rows interface {
 	return out, rows.Err()
 }
 
-// findingAssetHit 是一条发现在构树阶段需要的最小信息。
+// findingAssetHit adalah informasi minimal yang diperlukan satu temuan pada tahap pembangunan pohon.
 type findingAssetHit struct {
 	severity string
 	ts       time.Time
 	assetIDs []int64
 }
 
-// BuildFindingAssetTree 按当前筛选构建资产树。AssetScope 自身不参与(否则树会随
-// 选中节点塌缩成一条链)。
+// BuildFindingAssetTree membangun pohon aset berdasarkan filter saat ini. AssetScope sendiri tidak ikut berperan (kalau ikut, pohon akan
+// menyusut jadi satu rantai ikut node yang terpilih).
 func (d *DB) BuildFindingAssetTree(f FindingFilter) (*FindingAssetTree, error) {
 	return d.buildFindingAssetTree(f, findingAssetTreeMaxNodes)
 }
 
-// buildFindingAssetTree 是带节点上限的内部实现。maxNodes<=0 表示不截断——解析
-// AssetScope 时必须用这个模式,否则被丢掉的 endpoint 会让子树 id 集合不全。
+// buildFindingAssetTree adalah implementasi internal dengan batas jumlah node. maxNodes<=0 berarti tidak dipotong, mode ini wajib dipakai saat mengurai
+// AssetScope, kalau tidak endpoint yang dibuang akan membuat kumpulan id subtree tidak lengkap.
 func (d *DB) buildFindingAssetTree(f FindingFilter, maxNodes int) (*FindingAssetTree, error) {
 	f.AssetScope = ""
 	f.assetIDs, f.assetNone, f.assetMiss = nil, false, false
@@ -180,9 +188,9 @@ FROM findings f LEFT JOIN tasks t ON f.task_id = t.id`+where, args...)
 		return nil, err
 	}
 
-	// 计数:一条发现沿它每个资产的祖先链向上,收集去重后的 key 集合再逐个 +1,
-	// 所以父节点不会因为一条发现挂了多个子资产而重复计数。
-	unassigned := &FindingAssetNode{Key: FindingUnassignedAsset, Kind: "none", Label: "未关联资产"}
+	// Menghitung: satu temuan menyusuri rantai leluhur dari setiap asetnya ke atas, mengumpulkan kumpulan key yang sudah dedup lalu +1 satu per satu,
+	// jadi node induk tidak dihitung dobel hanya karena satu temuan tertaut ke beberapa aset anak.
+	unassigned := &FindingAssetNode{Key: FindingUnassignedAsset, Kind: "none", Label: "Aset tidak terkait"}
 	touched := map[string]bool{}
 	for _, h := range hits {
 		clear(touched)
@@ -223,7 +231,7 @@ FROM findings f LEFT JOIN tasks t ON f.task_id = t.id`+where, args...)
 	return tree, nil
 }
 
-// countFinding 把一条发现累加到节点上(总数 / 严重度分桶 / 最近发现时间)。
+// countFinding mengakumulasi satu temuan ke node (total / bucket tingkat keparahan / waktu temuan terakhir).
 func countFinding(n *FindingAssetNode, h findingAssetHit) {
 	if n == nil {
 		return
@@ -244,8 +252,8 @@ func countFinding(n *FindingAssetNode, h findingAssetHit) {
 	}
 }
 
-// loadFindingAssetRows 读取命中的资产行,并逐轮补齐祖先(service 的宿主域名/IP、
-// 子域名的根域名)。祖先自身可能没有任何发现,但树需要它们才能成形。
+// loadFindingAssetRows membaca baris aset yang terjaring, dan melengkapi leluhurnya secara bertahap (domain/IP host dari service,
+// root domain dari subdomain). Leluhur itu sendiri mungkin tidak punya temuan apa pun, tetapi pohon butuh mereka agar terbentuk.
 func (d *DB) loadFindingAssetRows(ids map[int64]bool) (map[int64]*assetRow, error) {
 	byID := map[int64]*assetRow{}
 	if len(ids) == 0 {
@@ -267,8 +275,8 @@ func (d *DB) loadFindingAssetRows(ids map[int64]bool) (map[int64]*assetRow, erro
 		byID[a.id] = a
 	}
 
-	// 每轮找出还缺父节点的宿主标识,批量补一层;层数固定(endpoint→service→
-	// subdomain/ip→root_domain),4 轮足够收敛。
+	// Setiap putaran mencari identitas host yang masih kekurangan node induk, lalu melengkapi satu level sekaligus; jumlah levelnya tetap
+	// (endpoint -> service -> subdomain/ip -> root_domain), 4 putaran sudah cukup untuk konvergen.
 	for range 4 {
 		want := missingParents(byID)
 		if want.empty() {
@@ -285,20 +293,20 @@ func (d *DB) loadFindingAssetRows(ids map[int64]bool) (map[int64]*assetRow, erro
 	return byID, nil
 }
 
-// missingHosts 是一轮补齐里要去库里找的宿主标识,按目标资产类型分开。
+// missingHosts adalah identitas host yang perlu dicari ke database dalam satu putaran pelengkapan, dipisah per jenis aset tujuan.
 type missingHosts struct {
-	services []string // endpoint 的宿主(找 service 行)
-	domains  []string // service/endpoint 的宿主域名(找 subdomain 行)
-	ips      []string // service/endpoint 的宿主 IP(找 ip 行)
-	roots    []string // 子域名的根域名(找 root_domain 行)
+	services []string // host dari endpoint (mencari baris service)
+	domains  []string // domain host dari service/endpoint (mencari baris subdomain)
+	ips      []string // IP host dari service/endpoint (mencari baris ip)
+	roots    []string // root domain dari subdomain (mencari baris root_domain)
 }
 
 func (m missingHosts) empty() bool {
 	return len(m.services) == 0 && len(m.domains) == 0 && len(m.ips) == 0 && len(m.roots) == 0
 }
 
-// missingParents 汇总还没被加载的宿主:service(供 endpoint 挂靠)、子域名/IP(供
-// service 与 endpoint 挂靠)与根域名(供子域名挂靠)。
+// missingParents merangkum host yang belum termuat: service (untuk tempat bergantung endpoint), subdomain/IP (untuk tempat
+// bergantung service dan endpoint), dan root domain (untuk tempat bergantung subdomain).
 func missingParents(byID map[int64]*assetRow) missingHosts {
 	haveService := map[string]bool{}
 	haveDomain := map[string]bool{}
@@ -326,8 +334,8 @@ func missingParents(byID map[int64]*assetRow) missingHosts {
 		switch a.kind {
 		case "service", "endpoint":
 			host, _ := a.hostPort()
-			// endpoint 先找同宿主的 service;端口对不上的 service 会以 Total=0
-			// 被最终过滤掉,不会污染树。
+			// endpoint lebih dulu mencari service dengan host yang sama; service yang portnya tidak cocok akan berakhir dengan Total=0
+			// dan akhirnya ikut tersaring, tidak akan mengotori pohon.
 			if a.kind == "endpoint" && host != "" && !haveService[host] {
 				wantService[host] = true
 			}
@@ -366,7 +374,7 @@ func keysOf(m map[string]bool) []string {
 	return out
 }
 
-// isIPLiteral 粗判一个 host 是不是 IP 字面量(用于决定去 ip 还是 subdomain 表找宿主)。
+// isIPLiteral menebak kasar apakah sebuah host adalah literal IP (dipakai untuk menentukan mencari di tabel ip atau subdomain).
 func isIPLiteral(host string) bool {
 	if strings.Contains(host, ":") {
 		return true // IPv6
@@ -385,7 +393,7 @@ func isIPLiteral(host string) bool {
 	return strings.Count(host, ".") == 3
 }
 
-// loadAssetsByHost 按宿主标识批量补齐资产行,返回本轮新增的行数。
+// loadAssetsByHost melengkapi baris aset secara batch berdasarkan identitas host, mengembalikan jumlah baris baru yang ditambahkan di putaran ini.
 func (d *DB) loadAssetsByHost(want missingHosts, byID map[int64]*assetRow) (int, error) {
 	added := 0
 	load := func(q string, arg []string) error {
@@ -428,8 +436,8 @@ WHERE a.type='root_domain' AND a.domain = ANY($1::text[])`, want.roots); err != 
 	return added, nil
 }
 
-// assembleFindingAssetNodes 把资产行变成节点并连上父子关系。父节点缺位时(库里
-// 根本没有那条根域名资产)合成 "r:<domain>" 占位节点,与覆盖图的处理一致。
+// assembleFindingAssetNodes mengubah baris aset menjadi node dan menyambungkan relasi parent-child. Saat parent tidak ada (database
+// memang tidak punya baris aset root domain itu), dibuat node placeholder sintetis "r:<domain>", konsisten dengan penanganan di graph coverage.
 func (d *DB) assembleFindingAssetNodes(byID map[int64]*assetRow) (map[string]*FindingAssetNode, map[string]string) {
 	nodes := map[string]*FindingAssetNode{}
 	parentOf := map[string]string{}
@@ -466,7 +474,7 @@ func (d *DB) assembleFindingAssetNodes(byID map[int64]*assetRow) (map[string]*Fi
 		}
 	}
 
-	// 子域名的根域名在库里没有资产行时,合成一个占位根,免得子域名散成顶层。
+	// Saat root domain dari subdomain tidak punya baris aset di database, dibuat root placeholder, agar subdomain tidak tercecer jadi top-level.
 	for _, a := range byID {
 		if a.kind != "subdomain" || a.rootDomain == "" {
 			continue
@@ -513,8 +521,8 @@ func (d *DB) assembleFindingAssetNodes(byID map[int64]*assetRow) (map[string]*Fi
 	return nodes, parentOf
 }
 
-// attachCompanyNodes 给顶层资产(根域名 / IP / 应用)补企业父节点——只有资产确实
-// 归属了企业才会出现企业层,没归属的资产仍然自己就是顶层。
+// attachCompanyNodes menambahkan node induk perusahaan untuk aset top-level (root domain / IP / app), hanya kalau aset itu memang
+// dimiliki perusahaan tersebut level perusahaan akan muncul; aset tanpa kepemilikan tetap jadi top-level sendiri.
 func (d *DB) attachCompanyNodes(nodes map[string]*FindingAssetNode, parentOf map[string]string) error {
 	want := map[int64]bool{}
 	for _, n := range nodes {
@@ -556,7 +564,7 @@ func (d *DB) attachCompanyNodes(nodes map[string]*FindingAssetNode, parentOf map
 			continue
 		}
 		if name == "" {
-			name = "企业 #" + strconv.FormatInt(id, 10)
+			name = "Perusahaan #" + strconv.FormatInt(id, 10)
 		}
 		nodes[key] = &FindingAssetNode{Key: key, Kind: "company", Label: name, CompanyID: id}
 	}
@@ -577,8 +585,8 @@ func (d *DB) attachCompanyNodes(nodes map[string]*FindingAssetNode, parentOf map
 	return nil
 }
 
-// sortFindingAssetNodes 排序:发现多的在前,同数按标签;「未关联资产」恒在最后。
-// 前端按数组顺序挂子节点,所以只要同一父节点下的相对顺序正确即可。
+// sortFindingAssetNodes mengurutkan: yang temuannya lebih banyak di depan, kalau sama urutkan berdasarkan label; "aset tidak terkait" selalu di paling akhir.
+// Frontend menggantungkan node anak berdasarkan urutan array, jadi urutan relatif di bawah parent yang sama cukup benar saja.
 func sortFindingAssetNodes(nodes []FindingAssetNode) {
 	sort.SliceStable(nodes, func(i, j int) bool {
 		a, b := nodes[i], nodes[j]
@@ -592,8 +600,8 @@ func sortFindingAssetNodes(nodes []FindingAssetNode) {
 	})
 }
 
-// truncateFindingAssetTree 在节点过多时整层丢弃(先 endpoint 再 service)。计数已
-// 累加到父节点,丢的只是可展开的细节层级。
+// truncateFindingAssetTree membuang seluruh level saat node terlalu banyak (endpoint dulu, baru service). Hitungannya
+// sudah diakumulasi ke node induk, yang hilang hanya level detail yang bisa di-expand.
 func truncateFindingAssetTree(tree *FindingAssetTree, maxNodes int) {
 	if maxNodes <= 0 || len(tree.Nodes) <= maxNodes {
 		return
@@ -615,8 +623,8 @@ func truncateFindingAssetTree(tree *FindingAssetTree, maxNodes int) {
 	}
 }
 
-// applyAssetScope 把 AssetScope(节点 key)解析成可用于 SQL 的资产 id 集合。选中
-// 一个节点等于选中它的整棵子树,所以要先把树建出来再收集子孙。
+// applyAssetScope mengurai AssetScope (key node) menjadi kumpulan id aset yang bisa dipakai di SQL. Memilih
+// satu node berarti memilih seluruh subtree-nya, jadi pohonnya harus dibangun dulu sebelum mengumpulkan keturunannya.
 func (d *DB) applyAssetScope(f FindingFilter) (FindingFilter, error) {
 	scope := strings.TrimSpace(f.AssetScope)
 	f.assetIDs, f.assetNone, f.assetMiss = nil, false, false
@@ -627,7 +635,7 @@ func (d *DB) applyAssetScope(f FindingFilter) (FindingFilter, error) {
 		f.assetNone = true
 		return f, nil
 	}
-	// 不截断:被丢掉的 endpoint 同样要参与 id 收集,否则列表会少数据。
+	// Tidak dipotong: endpoint yang dibuang tetap harus ikut dikumpulkan id-nya, kalau tidak daftar akan kekurangan data.
 	tree, err := d.buildFindingAssetTree(f, 0)
 	if err != nil {
 		return f, err
@@ -639,7 +647,7 @@ func (d *DB) applyAssetScope(f FindingFilter) (FindingFilter, error) {
 		children[n.Parent] = append(children[n.Parent], n)
 	}
 	if _, ok := byKey[scope]; !ok {
-		// 选中的节点在当前筛选下已经不存在,结果应当为空而不是退化成不过滤。
+		// Node yang dipilih sudah tidak ada lagi pada filter saat ini, hasilnya harus kosong, bukan malah berubah jadi tidak difilter sama sekali.
 		f.assetMiss = true
 		return f, nil
 	}
@@ -665,8 +673,8 @@ func (d *DB) applyAssetScope(f FindingFilter) (FindingFilter, error) {
 	return f, nil
 }
 
-// assetIDContainments 把资产 id 变成 jsonb 包含判断的右操作数集合,配合
-// idx_findings_asset_ids(GIN jsonb_path_ops)使用。
+// assetIDContainments mengubah id aset menjadi kumpulan operand kanan untuk pengecekan containment jsonb, dipakai bersama
+// idx_findings_asset_ids (GIN jsonb_path_ops).
 func assetIDContainments(ids []int64) []string {
 	out := make([]string, 0, len(ids))
 	for _, id := range ids {

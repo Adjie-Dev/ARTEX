@@ -1,3 +1,3 @@
-// Mock 开关。构建期注入的公开变量（NEXT_PUBLIC_ 前缀才在浏览器可读）。
-// Vercel 上设 NEXT_PUBLIC_MOCK=1 即整站走 mock、无需后端。
+// Saklar Mock. Variabel publik yang disuntikkan saat build (hanya bisa dibaca di browser dengan prefiks NEXT_PUBLIC_).
+// Atur NEXT_PUBLIC_MOCK=1 di Vercel agar seluruh situs memakai mock, tanpa perlu backend.
 export const MOCK = process.env.NEXT_PUBLIC_MOCK === "1";

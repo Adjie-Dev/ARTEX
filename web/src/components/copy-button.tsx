@@ -9,9 +9,9 @@ import { Button } from "@/components/ui/button";
 import { cn, copyText } from "@/lib/utils";
 
 type CopyButtonProps = {
-  // 要复制的文本;为空则按钮禁用。
+  // Teks yang akan disalin; jika kosong tombolnya dinonaktifkan.
   text: string | null | undefined;
-  // 复制成功后的 toast 文案,默认「已复制」。
+  // Teks toast setelah berhasil disalin, default-nya "Berhasil disalin".
   successMessage?: string;
   label?: React.ReactNode;
   size?: React.ComponentProps<typeof Button>["size"];
@@ -19,12 +19,12 @@ type CopyButtonProps = {
   className?: string;
 };
 
-// CopyButton 统一的「复制到剪贴板」按钮:内置成功/失败反馈,并在 HTTP 非安全上下文
-// 下自动降级(见 copyText)。
+// CopyButton adalah tombol "salin ke clipboard" yang seragam: sudah dilengkapi feedback berhasil/gagal, dan
+// otomatis turun ke mode fallback saat berada di konteks HTTP yang tidak aman (lihat copyText).
 export function CopyButton({
   text,
-  successMessage = "已复制",
-  label = "复制",
+  successMessage = "Berhasil disalin",
+  label = "Salin",
   size = "sm",
   variant = "outline",
   className,
@@ -47,7 +47,7 @@ export function CopyButton({
       if (timer.current) clearTimeout(timer.current);
       timer.current = setTimeout(() => setCopied(false), 1500);
     } else {
-      toast.error("复制失败，请手动选择文本复制");
+      toast.error("Gagal menyalin, silakan pilih teks secara manual untuk menyalin");
     }
   }
 

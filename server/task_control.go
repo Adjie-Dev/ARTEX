@@ -104,18 +104,18 @@ func (s *Server) applyTaskControlWithCause(t *Task, action string, pauseCause er
 		defer s.concMu.Unlock()
 		current, exists := s.m.Task(t.ID)
 		if !exists || current != t || s.engine.IsDeleting(t.ID) {
-			return out, fmt.Errorf("任务正在删除，无法控制")
+			return out, fmt.Errorf("tugas sedang dihapus, tidak bisa dikontrol")
 		}
 		if !s.engine.beginTaskOperation(t.ID) {
-			return out, fmt.Errorf("任务正在删除，无法控制")
+			return out, fmt.Errorf("tugas sedang dihapus, tidak bisa dikontrol")
 		}
 		defer s.engine.decInflight(t.ID)
 		lifecycle := t.lifecycleSnapshot()
 		if isTerminalStatus(lifecycle.Status) {
-			return out, fmt.Errorf("终态任务不能执行暂停")
+			return out, fmt.Errorf("tugas berstatus akhir tidak bisa dijeda")
 		}
 		if lifecycle.Paused {
-			return out, fmt.Errorf("任务已经暂停")
+			return out, fmt.Errorf("tugas sudah dijeda")
 		}
 		wasQueued := lifecycle.Queued
 		wasEnginePaused := s.engine.IsPaused(t.ID)
@@ -145,11 +145,11 @@ func (s *Server) applyTaskControlWithCause(t *Task, action string, pauseCause er
 	default:
 		return out, fmt.Errorf("action must be pause|resume")
 	}
-	log.Printf("[task] #%s %s", t.ID, map[string]string{"pause": "已暂停", "resume": "已继续"}[action])
+	log.Printf("[task] #%s %s", t.ID, map[string]string{"pause": "dijeda", "resume": "dilanjutkan"}[action])
 	return out, nil
 }
 
-// intentSummaryOf 取意图 payload 里的 summary,供删除通知在意图节点消失(真删除)前留档。
+// intentSummaryOf mengambil summary dari payload intent, dipakai notifikasi penghapusan untuk mengarsipkan sebelum node intent lenyap (hard delete).
 func intentSummaryOf(n *db.Node) string {
 	if n == nil {
 		return ""
@@ -171,7 +171,7 @@ func (s *Server) applyIntentControl(ctx context.Context, t *Task, iid int64, act
 	}
 	if node == nil {
 		if inherited, sourceErr := t.Store.GetNodeWithSources(iid); sourceErr == nil && inherited != nil && inherited.Inherited {
-			return out, fmt.Errorf("继承意图为只读，不能控制")
+			return out, fmt.Errorf("intent warisan bersifat baca-saja, tidak bisa dikontrol")
 		}
 		return out, fmt.Errorf("intent not found")
 	}
@@ -181,7 +181,7 @@ func (s *Server) applyIntentControl(ctx context.Context, t *Task, iid int64, act
 	switch action {
 	case "pause":
 		if node.State != "running" {
-			return out, fmt.Errorf("仅运行中的意图可以暂停")
+			return out, fmt.Errorf("hanya intent yang sedang berjalan yang bisa dijeda")
 		}
 		if err := s.engine.ControlWork(ctx, iid, "pause"); err != nil {
 			return out, err
@@ -189,30 +189,32 @@ func (s *Server) applyIntentControl(ctx context.Context, t *Task, iid int64, act
 		out.State = "paused"
 	case "resume":
 		if node.State != "paused" {
-			return out, fmt.Errorf("仅已暂停的意图可以恢复")
+			return out, fmt.Errorf("hanya intent yang sedang dijeda yang bisa dilanjutkan")
 		}
 		changed, err := t.Store.CompareAndSetIntentState(iid, "paused", "open")
 		if err != nil {
 			return out, err
 		}
 		if !changed {
-			return out, fmt.Errorf("%w: 意图不再是 paused 状态", db.ErrIntentStateConflict)
+			return out, fmt.Errorf("%w: intent sudah tidak berstatus paused lagi", db.ErrIntentStateConflict)
 		}
 		t.Notify()
 		out.State = "open"
 	case "cancel":
-		// 删除支持两种模式:
-		//   soft(默认,假删除):意图停到 state='deleted'、删除原因记入 delete_reason 字段,
-		//     保留意图节点与全部产出/血缘,不再在图上另挂 fact。
-		//   hard(真删除):物理删除该意图及"仅由它支撑"的独占子孙节点(级联到叶子),避免留下
-		//     孤立数据;共享节点、goal、任务根事实保留。
-		// 两种模式都用 cancelled 触发告知 planner(意图内容 + 删除原因),让它据此重规划。
+		// Penghapusan mendukung dua mode:
+		//   soft (default, hapus semu): intent dihentikan ke state='deleted', alasan penghapusan
+		//     dicatat di field delete_reason, node intent dan semua hasil/silsilahnya tetap disimpan,
+		//     tidak ada fact baru yang digantung lagi di graf.
+		//   hard (hapus nyata): menghapus fisik intent ini beserta node turunan eksklusif yang
+		//     "hanya didukung olehnya" (berjenjang sampai daun), supaya tidak ada data yatim piatu;
+		//     node bersama, goal, dan fact akar tugas tetap disimpan.
+		//   Kedua mode memakai trigger cancelled untuk memberi tahu planner (isi intent + alasan penghapusan), supaya ia bisa menyusun rencana ulang.
 		if node.State != "running" && node.State != "paused" && node.State != "open" {
-			return out, fmt.Errorf("仅待领/运行中/已暂停的意图可以删除")
+			return out, fmt.Errorf("hanya intent berstatus menunggu/berjalan/dijeda yang bisa dihapus")
 		}
 		reason = strings.TrimSpace(reason)
 		if reason == "" {
-			return out, fmt.Errorf("请填写删除原因")
+			return out, fmt.Errorf("mohon isi alasan penghapusan")
 		}
 		if node.State == "running" {
 			if err := s.engine.ControlWork(ctx, iid, "cancel"); err != nil {
@@ -228,7 +230,7 @@ func (s *Server) applyIntentControl(ctx context.Context, t *Task, iid int64, act
 			s.cancelWorkerSide(t.ID, t.ExpID, iid)
 			t.NotifyCancelled(iid, summary, reason)
 			out.Deleted = &cleanup
-			out.State = "" // 节点已删除,前端据 Deleted 从列表移除
+			out.State = "" // node sudah dihapus, frontend menghapusnya dari daftar berdasarkan Deleted
 		} else {
 			if _, err := t.Store.SoftDeleteIntent(iid, reason); err != nil {
 				return out, err
@@ -259,7 +261,7 @@ func (s *Server) controlTasksBatch(w http.ResponseWriter, r *http.Request) {
 	}
 	taskIDs := normalizeBatchTaskIDs(req.TaskIDs)
 	if len(taskIDs) == 0 || len(taskIDs) > maxBatchControlIDs {
-		writeErr(w, 400, fmt.Sprintf("task_ids 数量必须为 1-%d", maxBatchControlIDs))
+		writeErr(w, 400, fmt.Sprintf("jumlah task_ids harus 1-%d", maxBatchControlIDs))
 		return
 	}
 	items := make([]batchControlItem, 0, len(taskIDs))

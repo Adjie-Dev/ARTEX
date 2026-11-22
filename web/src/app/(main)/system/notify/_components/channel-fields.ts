@@ -1,26 +1,26 @@
-// 渠道字段表与配置值的解析工具。
+// Tabel field channel dan utilitas parsing nilai konfigurasi.
 //
-// 与页面拆开是因为这一份是**数据**而不是视图：它描述每种渠道有哪些字段、
-// 各自该用什么控件，以及表单文本到配置值（JSON）的双向转换。
-// 单独放一个文件后，新增渠道只需要动这里，页面本身不必改。
-// 渠道类型的展示名与简介。放在前端是因为它只影响文案，后端不需要知道。
+// Dipisah dari halaman karena bagian ini adalah **data**, bukan tampilan: mendeskripsikan field apa yang dimiliki setiap channel,
+// kontrol apa yang dipakai masing-masing, serta konversi dua arah antara teks form dan nilai konfigurasi (JSON).
+// Dengan dipisah ke file sendiri, channel baru hanya perlu diubah di sini, halaman itu sendiri tidak perlu diubah.
+// Nama tampilan dan deskripsi singkat untuk tiap tipe channel. Ditaruh di frontend karena hanya memengaruhi teks tampilan, backend tidak perlu tahu.
 export const KIND_LABEL: Record<string, string> = {
-  dingtalk: "钉钉",
-  feishu: "飞书",
-  wecom: "企业微信",
-  webhook: "通用 Webhook",
+  dingtalk: "DingTalk",
+  feishu: "Feishu",
+  wecom: "WeCom",
+  webhook: "Webhook Umum",
   telegram: "Telegram",
-  email: "邮件",
+  email: "Email",
 };
 
-// 各渠道的配置字段定义。
+// Definisi field konfigurasi untuk setiap channel.
 //
-// 这里刻意保留一份前端字段表，而不是让后端下发 schema：后端只负责
-// Validate（必填/格式），UI 需要的是布局与控件类型，两者关注的不是同一件事。
-// 唯一的耦合点是 secret_keys —— 哪些字段该渲染成密码框由后端给出，
-// 因为只有渠道实现自己清楚哪些值算凭据（企业微信的整个 Webhook 就是凭据，
-// 而钉钉的只是其中一个 secret）。新增渠道时这里少一个条目只会让表单变空白，
-// 不会静默出错（下面的 hasFields 会提示）。
+// Tabel field frontend ini dipertahankan dengan sengaja, bukan membiarkan backend mengirim schema: backend hanya bertanggung jawab atas
+// Validate (wajib isi/format), sementara UI membutuhkan layout dan tipe kontrol, keduanya memperhatikan hal yang berbeda.
+// Satu-satunya titik keterkaitan adalah secret_keys, field mana yang harus dirender sebagai password box ditentukan oleh backend,
+// karena hanya implementasi channel itu sendiri yang tahu pasti nilai mana yang merupakan kredensial (untuk WeCom, seluruh Webhook adalah
+// kredensial, sedangkan untuk DingTalk hanya salah satu secret-nya). Saat channel baru ditambahkan, kurang satu entri di sini hanya akan
+// membuat form menjadi kosong, bukan gagal secara senyap (hasFields di bawah akan memberi peringatan).
 export type FieldKind = "text" | "password" | "number" | "select" | "textarea" | "switch" | "kv" | "list";
 export interface FieldDef {
   key: string;
@@ -34,56 +34,56 @@ export const CHANNEL_FIELDS: Record<string, FieldDef[]> = {
   dingtalk: [
     {
       key: "webhook",
-      label: "Webhook 地址",
+      label: "Alamat Webhook",
       kind: "text",
       placeholder: "https://oapi.dingtalk.com/robot/send?access_token=...",
     },
     {
       key: "secret",
-      label: "加签密钥",
+      label: "Kunci Penandatanganan",
       kind: "password",
-      help: "机器人安全设置选「加签」时填写；选「自定义关键词」或未开启安全设置则留空",
+      help: "Isi jika pengaturan keamanan bot memilih \"Penandatanganan\"; kosongkan jika memilih \"Kata Kunci Kustom\" atau pengaturan keamanan belum diaktifkan",
     },
   ],
   feishu: [
     {
       key: "webhook",
-      label: "Webhook 地址",
+      label: "Alamat Webhook",
       kind: "text",
       placeholder: "https://open.feishu.cn/open-apis/bot/v2/hook/...",
     },
-    { key: "secret", label: "签名校验密钥", kind: "password", help: "机器人开启「签名校验」时填写，否则留空" },
+    { key: "secret", label: "Kunci Verifikasi Tanda Tangan", kind: "password", help: "Isi jika bot mengaktifkan \"Verifikasi Tanda Tangan\", jika tidak biarkan kosong" },
   ],
   wecom: [
     {
       key: "webhook",
-      label: "Webhook 地址",
+      label: "Alamat Webhook",
       kind: "text",
       placeholder: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...",
     },
   ],
   webhook: [
-    { key: "url", label: "目标 URL", kind: "text", placeholder: "https://your-endpoint.example.com/hook" },
+    { key: "url", label: "URL Tujuan", kind: "text", placeholder: "https://your-endpoint.example.com/hook" },
     {
       key: "method",
-      label: "请求方法",
+      label: "Metode Request",
       kind: "select",
       options: [
-        { value: "POST", label: "POST（带请求体）" },
-        { value: "PUT", label: "PUT（带请求体）" },
-        { value: "PATCH", label: "PATCH（带请求体）" },
-        { value: "GET", label: "GET（不带请求体）" },
+        { value: "POST", label: "POST (dengan body request)" },
+        { value: "PUT", label: "PUT (dengan body request)" },
+        { value: "PATCH", label: "PATCH (dengan body request)" },
+        { value: "GET", label: "GET (tanpa body request)" },
       ],
     },
-    { key: "headers", label: "自定义请求头", kind: "kv", help: "每行 KEY=VALUE，例如 Authorization=Bearer xxx" },
+    { key: "headers", label: "Header Request Kustom", kind: "kv", help: "Satu baris KEY=VALUE, contoh Authorization=Bearer xxx" },
     {
       key: "body_template",
-      label: "请求体模板",
+      label: "Template Body Request",
       kind: "textarea",
       help:
-        "留空用内置默认模板。变量：{{.Title}} {{.Batch}} {{.Count}} {{.HomeURL}} {{.SentAt}}，" +
-        "以及 range .Items 下的 .Name/.VulnClass/.Severity/.Summary/.Assets/.DetailURL/.StatusLabel。" +
-        "插入字符串请用 {{json .Xxx}} 而不是 {{.Xxx}}，否则标题里的引号会破坏 JSON。",
+        "Dikosongkan untuk memakai template bawaan. Variabel: {{.Title}} {{.Batch}} {{.Count}} {{.HomeURL}} {{.SentAt}}, " +
+        "serta .Name/.VulnClass/.Severity/.Summary/.Assets/.DetailURL/.StatusLabel di bawah range .Items. " +
+        "Untuk menyisipkan string gunakan {{json .Xxx}}, bukan {{.Xxx}}, karena tanda kutip di judul bisa merusak JSON.",
     },
   ],
   telegram: [
@@ -91,35 +91,35 @@ export const CHANNEL_FIELDS: Record<string, FieldDef[]> = {
     { key: "chat_id", label: "Chat ID", kind: "text", placeholder: "-1001234567890" },
     {
       key: "base_url",
-      label: "API 地址",
+      label: "Alamat API",
       kind: "text",
       placeholder: "https://api.telegram.org",
-      help: "留空用官方地址；自建 Bot API 反代时填写",
+      help: "Dikosongkan untuk memakai alamat resmi; isi jika memakai reverse proxy Bot API sendiri",
     },
   ],
   email: [
-    { key: "host", label: "SMTP 服务器", kind: "text", placeholder: "smtp.example.com" },
+    { key: "host", label: "Server SMTP", kind: "text", placeholder: "smtp.example.com" },
     {
       key: "port",
-      label: "端口",
+      label: "Port",
       kind: "number",
       placeholder: "587",
-      help: "587 走 STARTTLS；465 请把「隐式 TLS」打开",
+      help: "Port 587 memakai STARTTLS; untuk 465 aktifkan \"TLS Implisit\"",
     },
-    { key: "username", label: "账号", kind: "text" },
-    { key: "password", label: "密码 / 授权码", kind: "password" },
-    { key: "from", label: "发件人", kind: "text", placeholder: "artex@example.com" },
-    { key: "to", label: "收件人", kind: "list", help: "多个地址用逗号分隔" },
-    { key: "tls", label: "隐式 TLS", kind: "switch", help: "465 端口打开；587 保持关闭（会自动 STARTTLS）" },
+    { key: "username", label: "Akun", kind: "text" },
+    { key: "password", label: "Kata Sandi / Kode Otorisasi", kind: "password" },
+    { key: "from", label: "Pengirim", kind: "text", placeholder: "artex@example.com" },
+    { key: "to", label: "Penerima", kind: "list", help: "Beberapa alamat dipisahkan dengan koma" },
+    { key: "tls", label: "TLS Implisit", kind: "switch", help: "Aktifkan untuk port 465; biarkan nonaktif untuk 587 (akan otomatis STARTTLS)" },
   ],
 };
 
 export const SEVERITY_OPTIONS = [
-  { value: "", label: "不限" },
-  { value: "low", label: "低危及以上" },
-  { value: "medium", label: "中危及以上" },
-  { value: "high", label: "高危及以上" },
-  { value: "critical", label: "仅严重" },
+  { value: "", label: "Tidak dibatasi" },
+  { value: "low", label: "Rendah ke atas" },
+  { value: "medium", label: "Sedang ke atas" },
+  { value: "high", label: "Tinggi ke atas" },
+  { value: "critical", label: "Hanya Kritis" },
 ];
 
 export type ChannelForm = {
@@ -152,7 +152,7 @@ export const emptyForm = (kind: string): ChannelForm => ({
   onStatusChange: false,
 });
 
-// parseKV 解析「每行 KEY=VALUE」的文本域。
+// parseKV mem-parsing textarea berformat "satu baris KEY=VALUE".
 export function parseKV(text: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const line of text.split("\n")) {
@@ -163,7 +163,7 @@ export function parseKV(text: string): Record<string, string> {
   }
   return out;
 }
-// parseIDs 解析逗号/空白分隔的 id 列表。
+// parseIDs mem-parsing daftar id yang dipisahkan koma/spasi.
 export function parseIDs(text: string): number[] {
   return text
     .split(/[\s,，]+/)
@@ -172,7 +172,7 @@ export function parseIDs(text: string): number[] {
     .map((s) => Number(s))
     .filter((n) => Number.isFinite(n) && n > 0);
 }
-// parseKeywords 解析行/逗号分隔的关键词列表（漏洞类型名可能含空格，所以按行或逗号切）。
+// parseKeywords mem-parsing daftar keyword yang dipisahkan baris/koma (nama tipe kerentanan bisa mengandung spasi, karena itu dipotong berdasarkan baris atau koma).
 export function parseKeywords(text: string): string[] {
   return text
     .split(/[\n,，]+/)

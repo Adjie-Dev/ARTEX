@@ -5,37 +5,53 @@ import (
 	"strings"
 )
 
-// 本文件是「Markdown 系」渠道（钉钉、企业微信）共用的消息渲染。
-// 飞书用卡片 JSON、Telegram 用 HTML、邮件用 HTML，各自在适配器里渲染。
+// File ini berisi rendering pesan yang dipakai bersama oleh channel bertipe
+// "Markdown" (DingTalk, WeCom).
+// Feishu memakai kartu JSON, Telegram memakai HTML, email memakai HTML,
+// masing-masing dirender di adapternya sendiri.
 
-// maxAssetsShown 是消息里最多列出几个资产。一个漏洞可能锚定几十个资产，
-// 全列会挤爆消息且没有信息价值——第 4 个之后的域名没人会在 IM 里看。
+// maxAssetsShown adalah jumlah maksimum asset yang ditampilkan dalam pesan.
+// Satu kerentanan bisa terhubung ke puluhan asset, menampilkan semuanya akan
+// membuat pesan penuh sesak tanpa nilai informasi tambahan, domain setelah
+// yang keempat tidak akan dibaca orang di chat IM.
 const maxAssetsShown = 3
 
-// maxSummaryRunes 是摘要被压缩到多少字符。IM 消息是「提示去看详情」，
-// 不是报告本体，完整内容在平台里。
+// maxSummaryRunes adalah jumlah karakter maksimum setelah ringkasan dipadatkan.
+// Pesan IM hanya "mengarahkan untuk melihat detail", bukan isi laporan itu
+// sendiri, isi lengkapnya ada di platform.
 const maxSummaryRunes = 120
 
-// markdownReservedBytes 预留给消息头部（汇总行 + 级别分布 + 可能的截断提示）
-// 与尾部（平台链接）。按整条打包时把这部分从预算里扣掉，保证头尾不会被截掉——
-// 头尾一旦被截，读者连「这是哪一批、还有多少条没显示」都看不出来。
+// markdownReservedBytes dicadangkan untuk kepala pesan (baris ringkasan +
+// distribusi level + kemungkinan catatan pemotongan) dan ekor pesan (tautan
+// platform). Saat mengepak pesan utuh, bagian ini dikurangi dari anggaran
+// byte agar kepala dan ekor tidak ikut terpotong, karena begitu bagian itu
+// terpotong, pembaca bahkan tidak bisa tahu "ini batch yang mana, dan berapa
+// item lagi yang belum ditampilkan".
 const markdownReservedBytes = 320
 
-// markdownEscape 转义 markdown 元字符。
+// markdownEscape melakukan escaping untuk karakter spesial markdown.
 //
-// 为什么必须做：漏洞标题、摘要、类型、资产展示名全都来自**不可信来源**——
-// 标题与摘要出自模型输出（模型读的是被测目标的响应），资产的 url 则是扫描
-// 得到的完整 URL（含目标可控的查询串）。不转义的话，一条标题为
+// Mengapa ini wajib dilakukan: judul kerentanan, ringkasan, jenis, dan nama
+// tampilan asset semuanya berasal dari **sumber yang tidak terpercaya**,
+// judul dan ringkasan berasal dari keluaran model (model membaca respons dari
+// target yang diuji), sedangkan url asset adalah URL lengkap hasil scanning
+// (termasuk query string yang bisa dikendalikan oleh target). Tanpa
+// escaping, sebuah kerentanan dengan judul seperti
 //
-//	登录口 SQL 注入\n[紧急：点此验证账号](http://attacker.tld)
+//	Login SQL Injection\n[Darurat: klik di sini untuk verifikasi akun](http://attacker.tld)
 //
-// 的漏洞会在安全工程师的钉钉/飞书里渲染成**可点击的外链**；而
-// `![](http://attacker.tld/beacon)` 会在渲染时被客户端拉取，等于通报了
-// 「这条漏洞已经被看过」并泄露阅读者 IP。就算是无恶意的内容，注入的粗体或
-// 引用块也能把下面的严重漏洞挤出折叠线。
+// akan dirender menjadi **tautan eksternal yang bisa diklik** di DingTalk/
+// Feishu milik security engineer; sedangkan `![](http://attacker.tld/beacon)`
+// akan diambil otomatis oleh klien saat dirender, yang sama saja dengan
+// memberi tahu penyerang bahwa "kerentanan ini sudah dilihat" dan membocorkan
+// IP pembaca. Bahkan konten yang tidak berbahaya pun, teks tebal atau
+// blockquote yang disuntikkan bisa mendorong kerentanan parah di bawahnya
+// keluar dari batas yang terlihat.
 //
-// 转义集合覆盖标题/链接/强调/列表/引用/删除线这几类会改变结构或产生可点击
-// 元素的字符。`\` 必须最先处理，否则会把后面补上的反斜杠再次转义。
+// Kumpulan karakter yang di-escape mencakup judul/tautan/penekanan/list/quote/
+// strikethrough, yaitu karakter yang bisa mengubah struktur atau menghasilkan
+// elemen yang bisa diklik. `\` harus diproses paling awal, jika tidak, garis
+// miring terbalik yang ditambahkan belakangan akan ikut di-escape lagi.
 func markdownEscape(s string) string {
 	replacer := strings.NewReplacer(
 		`\`, `\\`,
@@ -55,40 +71,50 @@ func markdownEscape(s string) string {
 	return replacer.Replace(s)
 }
 
-// markdownText 把不可信文本压成单行并转义，供 markdown 正文使用。
-// 单行化是转义之外的另一半：换行本身就能伪造出新的列表项或引用块，
-// 而转义字符挡不住它。
+// markdownText memadatkan teks yang tidak terpercaya menjadi satu baris lalu
+// melakukan escaping, dipakai untuk isi markdown.
+// Pemadatan jadi satu baris adalah separuh lain dari escaping: baris baru
+// saja sudah bisa memalsukan item list atau blockquote baru, dan karakter
+// escape tidak bisa mencegah itu.
 func markdownText(s string, maxRunes int) string {
 	return markdownEscape(OneLine(s, maxRunes))
 }
 
-// markdownTitle 返回消息标题（IM 平台的标题栏/卡片标题），内容是**未转义的原文**。
+// markdownTitle mengembalikan judul pesan (judul bar/judul kartu di platform
+// IM), isinya adalah **teks asli tanpa escaping**.
 //
-// 这里刻意不做转义：这个标题被四种语境的渲染器共用——markdown 正文、Telegram 的
-// HTML、飞书卡片的 plain_text、以及通用 Webhook 的 JSON 与邮件主题。每个语境的
-// 转义规则都不同（markdown 转义塞进 HTML 会留下可见的反斜杠，塞进 JSON 会污染
-// 数据），所以转义必须由各自的输出端负责，见 writeItem / feishuItemLines /
-// telegramEscape。曾经在共享函数里加过 markdown 转义，结果 Telegram 消息里
-// 出现了 `\(1\)` 这种可见的反斜杠。
+// Escaping sengaja tidak dilakukan di sini: judul ini dipakai bersama oleh
+// empat renderer dengan konteks berbeda, isi markdown, HTML milik Telegram,
+// plain_text kartu Feishu, serta JSON Webhook umum dan subjek email. Aturan
+// escaping di setiap konteks berbeda-beda (escaping markdown yang dimasukkan
+// ke HTML akan menyisakan garis miring terbalik yang terlihat, dimasukkan ke
+// JSON akan mencemari data), sehingga escaping harus dilakukan oleh masing-
+// masing sisi output, lihat writeItem / feishuItemLines / telegramEscape.
+// Pernah ditambahkan escaping markdown di fungsi bersama ini, akibatnya pesan
+// Telegram menampilkan garis miring terbalik yang terlihat seperti `\(1\)`.
 func markdownTitle(m Message) string {
 	if m.Batch {
-		return fmt.Sprintf("漏洞汇总 · 共 %d 条", len(m.Items))
+		return fmt.Sprintf("Ringkasan Kerentanan . Total %d item", len(m.Items))
 	}
 	if len(m.Items) == 0 {
-		return "漏洞通知"
+		return "Notifikasi Kerentanan"
 	}
 	it := m.Items[0]
 	return fmt.Sprintf("[%s] %s", SeverityLabel(it.Severity), OneLine(it.Title(), 0))
 }
 
-// markdownBody 渲染消息正文，返回正文与**实际写入的条目数**。
+// markdownBody merender isi pesan, mengembalikan isi pesan beserta **jumlah
+// item yang benar-benar ditulis**.
 //
-// 返回值 kept 是这次投递真正送达的条目数，调用方据此只把前 kept 条标记为
-// 已送达——被渠道长度上限挡在外面的条目必须留待下一批，而不是跟着一起被
-// 标记成功。这正是「静默丢失」的来源：消息被截断了，但投递记录显示全部送达，
-// 没有任何地方能看出后半截从未发出。
+// Nilai kembali kept adalah jumlah item yang benar-benar terkirim pada
+// pengiriman ini, pemanggil berdasarkan ini hanya menandai kept item pertama
+// sebagai sudah terkirim, item yang terpotong karena batas panjang channel
+// harus disimpan untuk batch berikutnya, bukan ikut ditandai berhasil. Inilah
+// sumber "kehilangan diam-diam": pesan terpotong, tapi catatan pengiriman
+// menunjukkan semua sudah terkirim, tidak ada tempat yang menunjukkan bahwa
+// separuh bagian belakang tidak pernah dikirim.
 //
-// maxBytes<=0 表示不限制。
+// maxBytes<=0 berarti tidak ada batas.
 func markdownBody(m Message, maxBytes int) (string, int) {
 	if !m.Batch {
 		if len(m.Items) == 0 {
@@ -96,14 +122,15 @@ func markdownBody(m Message, maxBytes int) (string, int) {
 		}
 		var b strings.Builder
 		writeItem(&b, m.Items[0], "", true)
-		// 单条消息即使超长也照发（由最终截断兜底）：一条漏洞的部分信息
-		// 也好过一条都不发。
+		// Pesan tunggal tetap dikirim meskipun terlalu panjang (dipotong
+		// sebagai jalan terakhir): sebagian informasi kerentanan lebih baik
+		// daripada tidak terkirim sama sekali.
 		return TruncateBytes(b.String(), maxBytes), 1
 	}
 
 	footer := ""
 	if m.HomeURL != "" {
-		footer = fmt.Sprintf("\n[在平台中查看全部](%s)\n", m.HomeURL)
+		footer = fmt.Sprintf("\n[Lihat semua di platform](%s)\n", m.HomeURL)
 	}
 	kept := packItemCount(m.Items, maxBytes, markdownReservedBytes, footer, byteSize, func(it Item, idx int) string {
 		var b strings.Builder
@@ -121,24 +148,31 @@ func markdownBody(m Message, maxBytes int) (string, int) {
 	return TruncateBytes(b.String(), maxBytes), kept
 }
 
-// markdownBatchIntro 渲染汇总消息的开头：时间窗、条数与级别分布。
-// 有了这些，收到汇总的人不用点进平台就能判断这批需不需要立刻处理。
+// markdownBatchIntro merender bagian awal pesan ringkasan: rentang waktu,
+// jumlah item, dan distribusi level.
+// Dengan ini, penerima ringkasan bisa menilai apakah batch ini perlu segera
+// ditangani tanpa harus membuka platform.
 //
-// items 是**实际装下**的条目，total 是本批应有的总数。两者不同时必须明说
-// 「还有多少条在下一条消息里」——否则读者会以为消息头写的那个数字就是全部，
-// 而后面那些从未发出的条目在界面上完全不存在。
+// items adalah item yang **benar-benar tertampung**, total adalah jumlah
+// total yang seharusnya ada pada batch ini. Jika kedua angka berbeda, harus
+// dijelaskan dengan jelas "masih ada berapa item di pesan berikutnya", kalau
+// tidak pembaca akan mengira angka di kepala pesan itu adalah jumlah semua
+// item, padahal item yang tidak pernah terkirim itu sama sekali tidak
+// terlihat di antarmuka.
 func markdownBatchIntro(m Message, items []Item, total int) string {
 	var b strings.Builder
 	if m.WindowMinutes > 0 {
-		fmt.Fprintf(&b, "**近 %d 分钟新增 %d 个漏洞**", m.WindowMinutes, total)
+		fmt.Fprintf(&b, "**%d kerentanan baru dalam %d menit terakhir**", total, m.WindowMinutes)
 	} else {
-		fmt.Fprintf(&b, "**新增 %d 个漏洞**", total)
+		fmt.Fprintf(&b, "**%d kerentanan baru**", total)
 	}
 	if extra := total - len(items); extra > 0 {
-		fmt.Fprintf(&b, "（本条显示前 %d 条，其余 %d 条将在下一条消息继续）", len(items), extra)
+		fmt.Fprintf(&b, " (pesan ini menampilkan %d item pertama, %d item lainnya akan dilanjutkan di pesan berikutnya)", len(items), extra)
 	}
-	// 按级别给出分布，让读者一眼看到有没有严重项。只统计**本条实际包含**的
-	// 条目，保证「严重 3」和下面能数出来的条目一致。
+	// Tampilkan distribusi per level, agar pembaca langsung tahu apakah ada
+	// item kritis. Hanya menghitung item yang **benar-benar termuat** di
+	// pesan ini, memastikan angka "kritis 3" konsisten dengan item yang bisa
+	// dihitung di bawahnya.
 	counts := map[string]int{}
 	for _, it := range items {
 		counts[it.Severity]++
@@ -156,18 +190,23 @@ func markdownBatchIntro(m Message, items []Item, total int) string {
 	return b.String()
 }
 
-// writeItem 渲染单个漏洞条目。
+// writeItem merender satu item kerentanan.
 //
-// prefix 用于汇总列表的序号；single=true 时渲染完整版（含摘要与回链），
-// 汇总列表里只渲染一行摘要——否则 50 条汇总会变成一篇长文档。
+// prefix dipakai untuk nomor urut di daftar ringkasan; single=true merender
+// versi lengkap (termasuk ringkasan dan tautan balik), di daftar ringkasan
+// hanya dirender satu baris ringkasan, kalau tidak, ringkasan 50 item akan
+// menjadi dokumen yang sangat panjang.
 //
-// 所有来自外部的内容（标题/类型/资产/摘要）都过 markdownText：
-// 单行化 + 转义。回链是管理员配置的 public_base_url 拼出来的，不是不可信内容，
-// 且必须是可点的链接，所以原样输出。
+// Semua konten dari luar (judul/jenis/asset/ringkasan) melewati markdownText:
+// dipadatkan jadi satu baris lalu di-escape. Tautan balik dibentuk dari
+// public_base_url yang dikonfigurasi admin, bukan konten yang tidak
+// terpercaya, dan harus berupa tautan yang bisa diklik, sehingga ditulis apa
+// adanya.
 func writeItem(b *strings.Builder, it Item, prefix string, single bool) {
 	line := fmt.Sprintf("%s**%s · %s**", prefix, SeverityLabel(it.Severity), markdownText(it.Title(), 0))
 	if !single {
-		// 汇总模式：单行呈现，资产与摘要压缩后跟在后面。
+		// Mode ringkasan: ditampilkan satu baris, asset dan ringkasan
+		// dipadatkan lalu ditempel di belakang.
 		var extras []string
 		if a := assetLine(it.Assets, maxAssetsShown); a != "" {
 			extras = append(extras, markdownText(a, 0))
@@ -183,21 +222,21 @@ func writeItem(b *strings.Builder, it Item, prefix string, single bool) {
 	}
 	b.WriteString(line + "\n")
 	if it.IsStatusChange() {
-		fmt.Fprintf(b, "**状态变更**：%s → %s\n",
+		fmt.Fprintf(b, "**Perubahan Status**: %s -> %s\n",
 			markdownText(StatusLabel(it.FromStatus), 0), markdownText(StatusLabel(it.ToStatus), 0))
 	}
 	if it.VulnClass != "" && it.VulnClass != it.Title() {
-		fmt.Fprintf(b, "**类型**：%s\n", markdownText(it.VulnClass, 0))
+		fmt.Fprintf(b, "**Jenis**: %s\n", markdownText(it.VulnClass, 0))
 	}
 	if a := assetLine(it.Assets, maxAssetsShown); a != "" {
-		fmt.Fprintf(b, "**资产**：%s\n", markdownText(a, 0))
+		fmt.Fprintf(b, "**Asset**: %s\n", markdownText(a, 0))
 	}
 	if it.Summary != "" {
 		if s := markdownText(it.Summary, maxSummaryRunes); s != "" {
-			fmt.Fprintf(b, "**摘要**：%s\n", s)
+			fmt.Fprintf(b, "**Ringkasan**: %s\n", s)
 		}
 	}
 	if it.DetailURL != "" {
-		fmt.Fprintf(b, "[查看详情](%s)\n", it.DetailURL)
+		fmt.Fprintf(b, "[Lihat detail](%s)\n", it.DetailURL)
 	}
 }
